@@ -265,6 +265,7 @@ func TestMessagesEndpointSpec_GetTranslator(t *testing.T) {
 	spec := MessagesEndpointSpec{}
 	for _, schema := range []filterapi.VersionedAPISchema{
 		{Name: filterapi.APISchemaGCPAnthropic},
+		{Name: filterapi.APISchemaGCPVertexAI},
 		{Name: filterapi.APISchemaAWSAnthropic},
 		{Name: filterapi.APISchemaAnthropic},
 		{Name: filterapi.APISchemaOpenAI},     // This is for OpenAI-schema backends like vLLM that support the /v1/messages endpoint
