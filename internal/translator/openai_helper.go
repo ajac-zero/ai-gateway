@@ -211,66 +211,72 @@ func appendAnthropicUserMessage(messages []openai.ChatCompletionMessageParamUnio
 		})
 	}
 
-	// Build structured content parts in a single pass. If image blocks are present,
-	// use the structured array format; otherwise, fall back to plain string for compatibility.
-	var parts []openai.ChatCompletionContentPartUserUnionParam
-	hasImages := false
-	for _, block := range msg.Content.Array {
-		switch {
-		case block.Text != nil:
-			parts = append(parts, openai.ChatCompletionContentPartUserUnionParam{
-				OfText: &openai.ChatCompletionContentPartTextParam{
-					Type: string(openai.ChatCompletionContentPartTextTypeText),
-					Text: block.Text.Text,
-				},
-			})
-		case block.Image != nil:
-			hasImages = true
-			url := anthropicImageSourceToURL(block.Image.Source)
-			parts = append(parts, openai.ChatCompletionContentPartUserUnionParam{
-				OfImageURL: &openai.ChatCompletionContentPartImageParam{
-					Type: openai.ChatCompletionContentPartImageTypeImageURL,
-					ImageURL: openai.ChatCompletionContentPartImageImageURLParam{
-						URL: url,
-					},
-				},
-			})
-		}
-	}
-	if hasImages {
-		if len(parts) > 0 {
-			messages = append(messages, openai.ChatCompletionMessageParamUnion{
-				OfUser: &openai.ChatCompletionUserMessageParam{
-					Content: openai.StringOrUserRoleContentUnion{Value: parts},
-					Role:    openai.ChatMessageRoleUser,
-				},
-			})
-		}
-	} else {
-		text := anthropicContentToText(msg.Content)
-		if text != "" {
-			messages = append(messages, openai.ChatCompletionMessageParamUnion{
-				OfUser: &openai.ChatCompletionUserMessageParam{
-					Content: openai.StringOrUserRoleContentUnion{Value: text},
-					Role:    openai.ChatMessageRoleUser,
-				},
-			})
-		}
+	// Emit user text if there is any non-tool-result content.
+	content, ok := anthropicUserContentToOpenAI(msg.Content)
+	if ok {
+		messages = append(messages, openai.ChatCompletionMessageParamUnion{
+			OfUser: &openai.ChatCompletionUserMessageParam{
+				Content: openai.StringOrUserRoleContentUnion{Value: content},
+				Role:    openai.ChatMessageRoleUser,
+			},
+		})
 	}
 
 	return messages
 }
 
-// anthropicImageSourceToURL converts an Anthropic ImageSource to an OpenAI-compatible URL.
-func anthropicImageSourceToURL(source anthropic.ImageSource) string {
-	switch {
-	case source.Base64 != nil:
-		return fmt.Sprintf("data:%s;base64,%s", source.Base64.MediaType, source.Base64.Data)
-	case source.URL != nil:
-		return source.URL.URL
-	default:
-		return ""
+func anthropicUserContentToOpenAI(content anthropic.MessageContent) (any, bool) {
+	if content.Text != "" {
+		return content.Text, true
 	}
+
+	parts := make([]openai.ChatCompletionContentPartUserUnionParam, 0, len(content.Array))
+	var text strings.Builder
+	hasImage := false
+	for _, block := range content.Array {
+		switch {
+		case block.Text != nil:
+			if block.Text.Text != "" {
+				text.WriteString(block.Text.Text)
+				parts = append(parts, openai.ChatCompletionContentPartUserUnionParam{
+					OfText: &openai.ChatCompletionContentPartTextParam{
+						Type: string(openai.ChatCompletionContentPartTextTypeText),
+						Text: block.Text.Text,
+					},
+				})
+			}
+		case block.Image != nil:
+			imageURL := anthropicImageSourceToOpenAIURL(block.Image.Source)
+			if imageURL != "" {
+				hasImage = true
+				parts = append(parts, openai.ChatCompletionContentPartUserUnionParam{
+					OfImageURL: &openai.ChatCompletionContentPartImageParam{
+						Type: openai.ChatCompletionContentPartImageTypeImageURL,
+						ImageURL: openai.ChatCompletionContentPartImageImageURLParam{
+							URL: imageURL,
+						},
+					},
+				})
+			}
+		}
+	}
+	if len(parts) == 0 {
+		return "", false
+	}
+	if !hasImage {
+		return text.String(), true
+	}
+	return parts, true
+}
+
+func anthropicImageSourceToOpenAIURL(source anthropic.ImageSource) string {
+	if source.URL != nil {
+		return source.URL.URL
+	}
+	if source.Base64 != nil {
+		return fmt.Sprintf("data:%s;base64,%s", source.Base64.MediaType, source.Base64.Data)
+	}
+	return ""
 }
 
 // toolResultToText extracts text from a ToolResultBlockParam.
