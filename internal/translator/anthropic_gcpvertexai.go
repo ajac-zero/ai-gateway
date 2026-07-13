@@ -218,6 +218,9 @@ func validateAnthropicContentBlockForGCPVertexAI(role anthropic.MessageRole, blo
 }
 
 func validateAnthropicToolResultForGCPVertexAI(toolResult *anthropic.ToolResultBlockParam) error {
+	if toolResult.IsError {
+		return fmt.Errorf("%w: tool_result is_error is not supported for GCP Vertex AI translation", internalapi.ErrInvalidRequestBody)
+	}
 	if toolResult.Content == nil {
 		return nil
 	}
