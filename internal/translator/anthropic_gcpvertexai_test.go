@@ -46,8 +46,8 @@ func TestAnthropicToGCPVertexAI_RequestBody(t *testing.T) {
 	require.JSONEq(t, `{
 		"contents":[{"parts":[{"text":"Tell me about AI Gateways"}],"role":"user"}],
 		"tools":null,
-		"generation_config":{"maxOutputTokens":100,"stopSequences":["stop1","stop2"],"temperature":0.1,"topK":40,"thinkingConfig":{"includeThoughts":true,"thinkingBudget":1024}},
-		"system_instruction":{"parts":[{"text":"You are a helpful assistant"}]}
+		"generationConfig":{"maxOutputTokens":100,"stopSequences":["stop1","stop2"],"temperature":0.1,"topK":40,"thinkingConfig":{"includeThoughts":true,"thinkingBudget":1024}},
+		"systemInstruction":{"parts":[{"text":"You are a helpful assistant"}]}
 	}`, string(body))
 }
 
@@ -72,7 +72,7 @@ func TestAnthropicToGCPVertexAI_RequestBodyWithImage(t *testing.T) {
 	require.JSONEq(t, `{
 		"contents":[{"parts":[{"text":"What is in this image?"},{"inlineData":{"mimeType":"image/png","data":"aW1hZ2U="}}],"role":"user"}],
 		"tools":null,
-		"generation_config":{"maxOutputTokens":100}
+		"generationConfig":{"maxOutputTokens":100}
 	}`, string(body))
 }
 
@@ -143,8 +143,8 @@ func TestAnthropicToGCPVertexAI_RequestBodyWithTools(t *testing.T) {
 	require.JSONEq(t, `{
 		"contents":[{"parts":[{"text":"What's the weather in Paris?"}],"role":"user"}],
 		"tools":[{"functionDeclarations":[{"name":"get_weather","description":"Get weather","parameters":{"type":"object","properties":{"location":{"type":"string"}},"required":["location"]}}]}],
-		"tool_config":{"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":["get_weather"]}},
-		"generation_config":{"maxOutputTokens":100}
+		"toolConfig":{"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":["get_weather"]}},
+		"generationConfig":{"maxOutputTokens":100}
 	}`, string(body))
 }
 
