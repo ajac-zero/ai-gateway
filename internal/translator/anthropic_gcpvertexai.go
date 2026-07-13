@@ -96,8 +96,9 @@ func (a *anthropicToGCPVertexAITranslator) RequestBody(_ []byte, body *anthropic
 	a.geminiTranslator.toolCallIndex = 0
 	if a.stream {
 		a.streamState = &openAIStreamToAnthropicState{
-			activeTools:  make(map[int64]*streamToolCall),
-			requestModel: a.requestModel,
+			activeTools:       make(map[int64]*streamToolCall),
+			requestModel:      a.requestModel,
+			includeInputUsage: true,
 		}
 	}
 
