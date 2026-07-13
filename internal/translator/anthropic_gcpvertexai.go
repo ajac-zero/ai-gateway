@@ -160,7 +160,10 @@ func validateAnthropicContentBlockForGCPVertexAI(role anthropic.MessageRole, blo
 	case block.SearchResult != nil:
 		return fmt.Errorf("%w: search_result content is not supported for GCP Vertex AI translation", internalapi.ErrInvalidRequestBody)
 	case block.Thinking != nil:
-		return fmt.Errorf("%w: thinking content blocks are not supported for GCP Vertex AI translation", internalapi.ErrInvalidRequestBody)
+		if role != anthropic.MessageRoleAssistant {
+			return fmt.Errorf("%w: thinking content is only supported in assistant messages", internalapi.ErrInvalidRequestBody)
+		}
+		return nil
 	case block.RedactedThinking != nil:
 		return fmt.Errorf("%w: redacted_thinking content blocks are not supported for GCP Vertex AI translation", internalapi.ErrInvalidRequestBody)
 	case block.ServerToolUse != nil:
