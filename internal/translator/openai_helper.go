@@ -1047,6 +1047,11 @@ func (s *openAIStreamToAnthropicState) emitClosingEvents(out *[]byte) error {
 		return nil
 	}
 	s.closingEmitted = true
+	if !s.messageStarted {
+		if err := s.emitMessageStart(out); err != nil {
+			return err
+		}
+	}
 
 	// Close the currently open content block.
 	if s.hasOpenBlock {

@@ -708,6 +708,24 @@ func TestOpenAIStreamToAnthropicState_ProcessBuffer_EmptyInput(t *testing.T) {
 	assert.Empty(t, out)
 }
 
+func TestOpenAIStreamToAnthropicState_ProcessBuffer_UsageOnly(t *testing.T) {
+	state := &openAIStreamToAnthropicState{
+		activeTools:  make(map[int64]*streamToolCall),
+		requestModel: "test-model",
+	}
+	state.buffer.WriteString("data: {\"id\":\"chatcmpl-empty\",\"model\":\"test-model\",\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":0}}\n\n")
+
+	var out []byte
+	err := state.processBuffer(&out, true)
+	require.NoError(t, err)
+
+	events := parseSSEEventsFromBytes(out)
+	require.Len(t, events, 3)
+	assert.Equal(t, "message_start", events[0].eventType)
+	assert.Equal(t, "message_delta", events[1].eventType)
+	assert.Equal(t, "message_stop", events[2].eventType)
+}
+
 func TestOpenAIStreamToAnthropicState_ProcessBuffer_SkipsDoneMarker(t *testing.T) {
 	// Ensure [DONE] marker does not cause errors or spurious events.
 	state := &openAIStreamToAnthropicState{
