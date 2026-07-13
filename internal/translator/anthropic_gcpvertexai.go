@@ -326,7 +326,7 @@ func (a *anthropicToGCPVertexAITranslator) ResponseBody(_ map[string]string, bod
 	newHeaders []internalapi.Header, newBody []byte, tokenUsage metrics.TokenUsage, responseModel string, err error,
 ) {
 	if a.stream {
-		return a.responseBodyStreaming(body, endOfStream)
+		return a.responseBodyStreaming(body, endOfStream, span)
 	}
 	return a.responseBodyNonStreaming(body, span)
 }
@@ -400,7 +400,7 @@ func geminiUsageToAnthropicUsage(metadata *genai.GenerateContentResponseUsageMet
 	}
 }
 
-func (a *anthropicToGCPVertexAITranslator) responseBodyStreaming(body io.Reader, endOfStream bool) (
+func (a *anthropicToGCPVertexAITranslator) responseBodyStreaming(body io.Reader, endOfStream bool, span tracingapi.MessageSpan) (
 	newHeaders []internalapi.Header, newBody []byte, tokenUsage metrics.TokenUsage, responseModel string, err error,
 ) {
 	responseModel = a.requestModel
@@ -451,6 +451,17 @@ func (a *anthropicToGCPVertexAITranslator) responseBodyStreaming(body io.Reader,
 	out := make([]byte, 0)
 	if err = a.streamState.processBuffer(&out, endOfStream); err != nil {
 		return nil, nil, tokenUsage, responseModel, err
+	}
+	if span != nil {
+		for line := range bytes.SplitSeq(out, []byte("\n")) {
+			if !bytes.HasPrefix(line, sseDataPrefix) {
+				continue
+			}
+			chunk := &anthropic.MessagesStreamChunk{}
+			if unmarshalErr := json.Unmarshal(bytes.TrimPrefix(line, sseDataPrefix), chunk); unmarshalErr == nil {
+				span.RecordResponseChunk(chunk)
+			}
+		}
 	}
 
 	responseModel = cmp.Or(a.streamState.model, a.requestModel)
