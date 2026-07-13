@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"strconv"
 	"strings"
 
@@ -131,12 +132,21 @@ func validateAnthropicToGCPVertexAIRequest(body *anthropic.MessagesRequest) erro
 	if body.ServiceTier != nil {
 		return fmt.Errorf("%w: service_tier is not supported for GCP Vertex AI translation", internalapi.ErrInvalidRequestBody)
 	}
+	if body.MaxTokens <= 0 || body.MaxTokens > maxInt32 || math.Trunc(body.MaxTokens) != body.MaxTokens {
+		return fmt.Errorf("%w: max_tokens must be a positive integer within the GCP Vertex AI supported range", internalapi.ErrInvalidRequestBody)
+	}
+	if body.TopK != nil && (*body.TopK < 0 || float64(float32(*body.TopK)) != float64(*body.TopK)) {
+		return fmt.Errorf("%w: top_k must be a non-negative integer exactly representable by GCP Vertex AI", internalapi.ErrInvalidRequestBody)
+	}
 	if body.Thinking != nil {
 		if body.Thinking.Adaptive != nil {
 			return fmt.Errorf("%w: Anthropic thinking type adaptive is not supported for GCP Vertex AI", internalapi.ErrInvalidRequestBody)
 		}
-		if body.Thinking.Enabled != nil && body.Thinking.Enabled.BudgetTokens > maxInt32 {
-			return fmt.Errorf("%w: Anthropic thinking budget_tokens exceeds supported range for GCP Vertex AI", internalapi.ErrInvalidRequestBody)
+		if body.Thinking.Enabled != nil {
+			budget := body.Thinking.Enabled.BudgetTokens
+			if budget < 0 || budget > maxInt32 || math.Trunc(budget) != budget {
+				return fmt.Errorf("%w: thinking budget_tokens must be a non-negative integer within the GCP Vertex AI supported range", internalapi.ErrInvalidRequestBody)
+			}
 		}
 	}
 	for i := range body.Tools {
