@@ -161,6 +161,21 @@ func TestAnthropicToGCPVertexAI_RequestBodyRejectsNonObjectToolSchema(t *testing
 	require.ErrorContains(t, err, "tool get_weather parameters must be a JSON object")
 }
 
+func TestAnthropicToGCPVertexAI_RequestBodyRejectsBuiltInTools(t *testing.T) {
+	req := &anthropicschema.MessagesRequest{
+		Model:     "gemini-1.5-pro",
+		MaxTokens: 100,
+		Messages:  []anthropicschema.MessageParam{{Role: anthropicschema.MessageRoleUser, Content: anthropicschema.MessageContent{Text: "Search the web"}}},
+		Tools: []anthropicschema.ToolUnion{{
+			WebSearchTool: &anthropicschema.WebSearchTool{Type: "web_search_20250305", Name: "web_search"},
+		}},
+	}
+
+	tr := NewAnthropicToGCPVertexAITranslator("")
+	_, _, err := tr.RequestBody(nil, req, false)
+	require.ErrorContains(t, err, "Anthropic built-in tool unsupported")
+}
+
 func TestAnthropicToGCPVertexAI_RequestBodyReplaysThinkingSignature(t *testing.T) {
 	req := &anthropicschema.MessagesRequest{
 		Model:     "gemini-2.5-pro",
