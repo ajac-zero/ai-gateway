@@ -141,6 +141,40 @@ func TestAnthropicToGCPVertexAI_RequestBodyRejectsUnsupportedOptions(t *testing.
 	}
 }
 
+func TestAnthropicToGCPVertexAI_RequestBodyRejectsInvalidNumericValues(t *testing.T) {
+	tests := []struct {
+		name        string
+		configure   func(*anthropicschema.MessagesRequest)
+		wantMessage string
+	}{
+		{name: "zero max tokens", configure: func(req *anthropicschema.MessagesRequest) { req.MaxTokens = 0 }, wantMessage: "max_tokens must be a positive integer"},
+		{name: "fractional max tokens", configure: func(req *anthropicschema.MessagesRequest) { req.MaxTokens = 1.5 }, wantMessage: "max_tokens must be a positive integer"},
+		{name: "overflowing max tokens", configure: func(req *anthropicschema.MessagesRequest) { req.MaxTokens = 1 << 31 }, wantMessage: "max_tokens must be a positive integer"},
+		{name: "negative top k", configure: func(req *anthropicschema.MessagesRequest) { value := -1; req.TopK = &value }, wantMessage: "top_k must be a non-negative integer"},
+		{name: "imprecise top k", configure: func(req *anthropicschema.MessagesRequest) { value := 1<<24 + 1; req.TopK = &value }, wantMessage: "top_k must be a non-negative integer"},
+		{name: "negative thinking budget", configure: func(req *anthropicschema.MessagesRequest) {
+			req.Thinking = &anthropicschema.Thinking{Enabled: &anthropicschema.ThinkingEnabled{BudgetTokens: -1}}
+		}, wantMessage: "thinking budget_tokens must be a non-negative integer"},
+		{name: "fractional thinking budget", configure: func(req *anthropicschema.MessagesRequest) {
+			req.Thinking = &anthropicschema.Thinking{Enabled: &anthropicschema.ThinkingEnabled{BudgetTokens: 1024.5}}
+		}, wantMessage: "thinking budget_tokens must be a non-negative integer"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &anthropicschema.MessagesRequest{
+				Model:     "gemini-1.5-pro",
+				MaxTokens: 100,
+				Messages:  []anthropicschema.MessageParam{{Role: anthropicschema.MessageRoleUser, Content: anthropicschema.MessageContent{Text: "Hello"}}},
+			}
+			tt.configure(req)
+			tr := NewAnthropicToGCPVertexAITranslator("")
+			_, _, err := tr.RequestBody(nil, req, false)
+			require.ErrorContains(t, err, tt.wantMessage)
+		})
+	}
+}
+
 func TestAnthropicToGCPVertexAI_RequestBodyWithTools(t *testing.T) {
 	req := &anthropicschema.MessagesRequest{
 		Model:     "gemini-1.5-pro",
