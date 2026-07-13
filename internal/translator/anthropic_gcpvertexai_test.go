@@ -173,11 +173,11 @@ func TestAnthropicToGCPVertexAI_ResponseBodyNonStreaming(t *testing.T) {
 		"content":[{"type":"text","text":"Hello from Gemini"}],
 		"model":"gemini-1.5-pro-002",
 		"stop_reason":"end_turn",
-		"usage":{"cache_creation_input_tokens":0,"cache_read_input_tokens":3,"input_tokens":10,"output_tokens":15}
+		"usage":{"cache_creation_input_tokens":0,"cache_read_input_tokens":3,"input_tokens":7,"output_tokens":15}
 	}`, string(body))
 	inputTokens, ok := tokenUsage.InputTokens()
 	require.True(t, ok)
-	require.Equal(t, uint32(13), inputTokens)
+	require.Equal(t, uint32(10), inputTokens)
 	outputTokens, ok := tokenUsage.OutputTokens()
 	require.True(t, ok)
 	require.Equal(t, uint32(15), outputTokens)
@@ -221,7 +221,7 @@ func TestAnthropicToGCPVertexAI_ResponseBodyStreaming(t *testing.T) {
 	require.Contains(t, out, "event: message_stop")
 	inputTokens, ok := tokenUsage.InputTokens()
 	require.True(t, ok)
-	require.Equal(t, uint32(13), inputTokens)
+	require.Equal(t, uint32(10), inputTokens)
 	outputTokens, ok := tokenUsage.OutputTokens()
 	require.True(t, ok)
 	require.Equal(t, uint32(5), outputTokens)

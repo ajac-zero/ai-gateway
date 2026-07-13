@@ -304,8 +304,9 @@ func geminiUsageToAnthropicUsage(metadata *genai.GenerateContentResponseUsageMet
 	if metadata == nil {
 		return nil
 	}
+	inputTokens := max(metadata.PromptTokenCount-metadata.CachedContentTokenCount, 0)
 	return &anthropic.Usage{
-		InputTokens:          float64(metadata.PromptTokenCount),
+		InputTokens:          float64(inputTokens),
 		OutputTokens:         float64(metadata.CandidatesTokenCount + metadata.ThoughtsTokenCount),
 		CacheReadInputTokens: float64(metadata.CachedContentTokenCount),
 	}
