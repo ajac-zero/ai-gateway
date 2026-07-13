@@ -247,17 +247,15 @@ func anthropicUserContentToOpenAI(content anthropic.MessageContent) (any, bool) 
 			}
 		case block.Image != nil:
 			imageURL := anthropicImageSourceToOpenAIURL(block.Image.Source)
-			if imageURL != "" {
-				hasImage = true
-				parts = append(parts, openai.ChatCompletionContentPartUserUnionParam{
-					OfImageURL: &openai.ChatCompletionContentPartImageParam{
-						Type: openai.ChatCompletionContentPartImageTypeImageURL,
-						ImageURL: openai.ChatCompletionContentPartImageImageURLParam{
-							URL: imageURL,
-						},
+			hasImage = true
+			parts = append(parts, openai.ChatCompletionContentPartUserUnionParam{
+				OfImageURL: &openai.ChatCompletionContentPartImageParam{
+					Type: openai.ChatCompletionContentPartImageTypeImageURL,
+					ImageURL: openai.ChatCompletionContentPartImageImageURLParam{
+						URL: imageURL,
 					},
-				})
-			}
+				},
+			})
 		}
 	}
 	if len(parts) == 0 {

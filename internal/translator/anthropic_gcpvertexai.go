@@ -202,6 +202,18 @@ func validateAnthropicContentBlockForGCPVertexAI(role anthropic.MessageRole, blo
 		if block.Image.CacheControl != nil {
 			return fmt.Errorf("%w: image cache_control is not supported for GCP Vertex AI translation", internalapi.ErrInvalidRequestBody)
 		}
+		switch {
+		case block.Image.Source.URL != nil:
+			if strings.TrimSpace(block.Image.Source.URL.URL) == "" {
+				return fmt.Errorf("%w: image URL must not be empty for GCP Vertex AI translation", internalapi.ErrInvalidRequestBody)
+			}
+		case block.Image.Source.Base64 != nil:
+			if block.Image.Source.Base64.MediaType == "" || block.Image.Source.Base64.Data == "" {
+				return fmt.Errorf("%w: base64 image media_type and data are required for GCP Vertex AI translation", internalapi.ErrInvalidRequestBody)
+			}
+		default:
+			return fmt.Errorf("%w: image source type is not supported for GCP Vertex AI translation", internalapi.ErrInvalidRequestBody)
+		}
 		return nil
 	case block.ToolUse != nil:
 		if role != anthropic.MessageRoleAssistant {

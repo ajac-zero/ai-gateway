@@ -1043,6 +1043,24 @@ func TestAppendAnthropicUserMessage_URLImage(t *testing.T) {
 	assert.Equal(t, "https://example.com/cat.png", parts[1].OfImageURL.ImageURL.URL)
 }
 
+func TestAppendAnthropicUserMessage_UnknownImageSource(t *testing.T) {
+	msg := anthropic.MessageParam{
+		Role: anthropic.MessageRoleUser,
+		Content: anthropic.MessageContent{Array: []anthropic.ContentBlockParam{
+			{Text: &anthropic.TextBlockParam{Type: "text", Text: "Describe this image"}},
+			{Image: &anthropic.ImageBlockParam{Type: "image", Source: anthropic.ImageSource{}}},
+		}},
+	}
+
+	msgs := appendAnthropicUserMessage(nil, msg)
+	require.Len(t, msgs, 1)
+	parts, ok := msgs[0].OfUser.Content.Value.([]openai.ChatCompletionContentPartUserUnionParam)
+	require.True(t, ok)
+	require.Len(t, parts, 2)
+	require.NotNil(t, parts[1].OfImageURL)
+	assert.Empty(t, parts[1].OfImageURL.ImageURL.URL)
+}
+
 func TestAppendAnthropicUserMessage_TextOnly(t *testing.T) {
 	// text-only user message still uses plain string content (backward compat)
 	msg := anthropic.MessageParam{
