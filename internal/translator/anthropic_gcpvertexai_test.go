@@ -519,6 +519,25 @@ func TestAnthropicToGCPVertexAI_ResponseBodyStreamingWithoutCandidates(t *testin
 	require.Equal(t, "message_stop", events[2].eventType)
 }
 
+func TestAnthropicToGCPVertexAI_ResponseBodyStreamingRecordsSpan(t *testing.T) {
+	tr := NewAnthropicToGCPVertexAITranslator("gemini-1.5-pro")
+	_, _, err := tr.RequestBody(nil, &anthropicschema.MessagesRequest{
+		Model:     "ignored",
+		Stream:    true,
+		MaxTokens: 100,
+		Messages:  []anthropicschema.MessageParam{{Role: anthropicschema.MessageRoleUser, Content: anthropicschema.MessageContent{Text: "Hello"}}},
+	}, false)
+	require.NoError(t, err)
+
+	span := &recordingAnthropicMessageSpan{}
+	_, _, _, _, err = tr.ResponseBody(nil, strings.NewReader(`data: {"responseId":"resp-1","candidates":[{"content":{"parts":[{"text":"Hello"}],"role":"model"},"finishReason":"STOP"}]}
+
+`), true, span)
+	require.NoError(t, err)
+	require.NotEmpty(t, span.chunks)
+	require.NotNil(t, span.chunks[0].MessageStart)
+}
+
 func TestAnthropicToGCPVertexAI_ResponseErrorUnknownJSON(t *testing.T) {
 	tr := NewAnthropicToGCPVertexAITranslator("gemini-1.5-pro")
 	headers, body, err := tr.ResponseError(map[string]string{statusHeaderName: "503"}, strings.NewReader(`{"unexpected":"shape"}`))
@@ -551,3 +570,15 @@ func TestAnthropicToGCPVertexAI_RedactAnthropicBody(t *testing.T) {
 func stringLength(body []byte) string {
 	return strconv.Itoa(len(body))
 }
+
+type recordingAnthropicMessageSpan struct {
+	chunks []*anthropicschema.MessagesStreamChunk
+}
+
+func (s *recordingAnthropicMessageSpan) RecordResponseChunk(chunk *anthropicschema.MessagesStreamChunk) {
+	s.chunks = append(s.chunks, chunk)
+}
+
+func (s *recordingAnthropicMessageSpan) RecordResponse(*anthropicschema.MessagesResponse) {}
+func (s *recordingAnthropicMessageSpan) EndSpanOnError(int, []byte)                       {}
+func (s *recordingAnthropicMessageSpan) EndSpan()                                         {}
