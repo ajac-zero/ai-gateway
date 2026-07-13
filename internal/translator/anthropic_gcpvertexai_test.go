@@ -441,6 +441,23 @@ func TestAnthropicToGCPVertexAI_ResponseHeadersStreaming(t *testing.T) {
 	require.Equal(t, []internalapi.Header{{contentTypeHeaderName, eventStreamContentType}}, headers)
 }
 
+func TestAnthropicToGCPVertexAI_ResponseBodyNonStreamingPromptBlocked(t *testing.T) {
+	tr := NewAnthropicToGCPVertexAITranslator("gemini-1.5-pro")
+	_, _, err := tr.RequestBody(nil, &anthropicschema.MessagesRequest{
+		Model:     "ignored",
+		MaxTokens: 100,
+		Messages:  []anthropicschema.MessageParam{{Role: anthropicschema.MessageRoleUser, Content: anthropicschema.MessageContent{Text: "Hello"}}},
+	}, false)
+	require.NoError(t, err)
+
+	_, body, _, _, err := tr.ResponseBody(nil, strings.NewReader(`{
+		"promptFeedback":{"blockReason":"SAFETY"},
+		"usageMetadata":{"promptTokenCount":10,"totalTokenCount":10}
+	}`), true, nil)
+	require.NoError(t, err)
+	require.Contains(t, string(body), `"stop_reason":"refusal"`)
+}
+
 func TestAnthropicToGCPVertexAI_ResponseBodyStreaming(t *testing.T) {
 	tr := NewAnthropicToGCPVertexAITranslator("gemini-1.5-pro")
 	_, _, err := tr.RequestBody(nil, &anthropicschema.MessagesRequest{
@@ -498,6 +515,7 @@ func TestAnthropicToGCPVertexAI_ResponseBodyStreamingWithoutCandidates(t *testin
 	require.Len(t, events, 3)
 	require.Equal(t, "message_start", events[0].eventType)
 	require.Equal(t, "message_delta", events[1].eventType)
+	require.Contains(t, events[1].data, `"stop_reason":"refusal"`)
 	require.Equal(t, "message_stop", events[2].eventType)
 }
 

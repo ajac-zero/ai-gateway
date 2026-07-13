@@ -349,6 +349,9 @@ func (a *anthropicToGCPVertexAITranslator) responseBodyNonStreaming(body io.Read
 		return nil, nil, metrics.TokenUsage{}, "", fmt.Errorf("error converting GCP response to OpenAI format: %w", err)
 	}
 	anthropicResp := openAIResponseToAnthropic(openAIResp, responseModel)
+	if gcpResp.PromptFeedback != nil && gcpResp.PromptFeedback.BlockReason != "" {
+		anthropicResp.StopReason = ptr.To(anthropic.StopReasonRefusal)
+	}
 	anthropicResp.Usage = geminiUsageToAnthropicUsage(gcpResp.UsageMetadata)
 	if a.debugLogEnabled && a.enableRedaction && a.logger != nil {
 		redactedResp := a.RedactAnthropicBody(anthropicResp)
@@ -415,6 +418,13 @@ func (a *anthropicToGCPVertexAITranslator) responseBodyStreaming(body io.Reader,
 	for i := range chunks {
 		chunk := &chunks[i]
 		openAIChunk := a.geminiTranslator.convertGCPChunkToOpenAI(chunk)
+		if chunk.PromptFeedback != nil && chunk.PromptFeedback.BlockReason != "" && len(openAIChunk.Choices) == 0 {
+			openAIChunk.Choices = []openai.ChatCompletionResponseChunkChoice{{
+				Index:        0,
+				Delta:        &openai.ChatCompletionResponseChunkChoiceDelta{Role: openai.ChatMessageRoleAssistant},
+				FinishReason: openai.ChatCompletionChoicesFinishReasonContentFilter,
+			}}
+		}
 		if err = serializeOpenAIChatCompletionChunk(openAIChunk, &openAIStream); err != nil {
 			return nil, nil, metrics.TokenUsage{}, "", fmt.Errorf("error marshaling OpenAI chunk: %w", err)
 		}
