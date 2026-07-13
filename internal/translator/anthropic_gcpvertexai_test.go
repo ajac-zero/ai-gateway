@@ -180,6 +180,10 @@ func TestAnthropicToGCPVertexAI_RequestBodyRejectsInvalidNumericValues(t *testin
 		{name: "zero max tokens", configure: func(req *anthropicschema.MessagesRequest) { req.MaxTokens = 0 }, wantMessage: "max_tokens must be a positive integer"},
 		{name: "fractional max tokens", configure: func(req *anthropicschema.MessagesRequest) { req.MaxTokens = 1.5 }, wantMessage: "max_tokens must be a positive integer"},
 		{name: "overflowing max tokens", configure: func(req *anthropicschema.MessagesRequest) { req.MaxTokens = 1 << 31 }, wantMessage: "max_tokens must be a positive integer"},
+		{name: "negative temperature", configure: func(req *anthropicschema.MessagesRequest) { value := -0.1; req.Temperature = &value }, wantMessage: "temperature must be between 0 and 1"},
+		{name: "temperature over one", configure: func(req *anthropicschema.MessagesRequest) { value := 1.1; req.Temperature = &value }, wantMessage: "temperature must be between 0 and 1"},
+		{name: "negative top p", configure: func(req *anthropicschema.MessagesRequest) { value := -0.1; req.TopP = &value }, wantMessage: "top_p must be between 0 and 1"},
+		{name: "top p over one", configure: func(req *anthropicschema.MessagesRequest) { value := 1.1; req.TopP = &value }, wantMessage: "top_p must be between 0 and 1"},
 		{name: "negative top k", configure: func(req *anthropicschema.MessagesRequest) { value := -1; req.TopK = &value }, wantMessage: "top_k must be a non-negative integer"},
 		{name: "imprecise top k", configure: func(req *anthropicschema.MessagesRequest) { value := 1<<24 + 1; req.TopK = &value }, wantMessage: "top_k must be a non-negative integer"},
 		{name: "negative thinking budget", configure: func(req *anthropicschema.MessagesRequest) {
