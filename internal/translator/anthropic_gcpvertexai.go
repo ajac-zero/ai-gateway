@@ -119,6 +119,18 @@ func validateAnthropicToGCPVertexAIRequest(body *anthropic.MessagesRequest) erro
 	if body == nil {
 		return fmt.Errorf("%w: request body is required", internalapi.ErrInvalidRequestBody)
 	}
+	if body.Container != nil {
+		return fmt.Errorf("%w: container is not supported for GCP Vertex AI translation", internalapi.ErrInvalidRequestBody)
+	}
+	if body.ContextManagement != nil {
+		return fmt.Errorf("%w: context_management is not supported for GCP Vertex AI translation", internalapi.ErrInvalidRequestBody)
+	}
+	if len(body.MCPServers) > 0 {
+		return fmt.Errorf("%w: mcp_servers are not supported for GCP Vertex AI translation", internalapi.ErrInvalidRequestBody)
+	}
+	if body.ServiceTier != nil {
+		return fmt.Errorf("%w: service_tier is not supported for GCP Vertex AI translation", internalapi.ErrInvalidRequestBody)
+	}
 	if body.Thinking != nil {
 		if body.Thinking.Adaptive != nil {
 			return fmt.Errorf("%w: Anthropic thinking type adaptive is not supported for GCP Vertex AI", internalapi.ErrInvalidRequestBody)
