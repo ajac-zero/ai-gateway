@@ -380,8 +380,8 @@ func tokenUsageFromAnthropicUsage(usage *anthropic.Usage) metrics.TokenUsage {
 	return metrics.ExtractTokenUsageFromExplicitCaching(
 		int64(usage.InputTokens),
 		int64(usage.OutputTokens),
-		ptr.To(int64(usage.CacheCreationInputTokens)),
 		ptr.To(int64(usage.CacheReadInputTokens)),
+		ptr.To(int64(usage.CacheCreationInputTokens)),
 	)
 }
 
