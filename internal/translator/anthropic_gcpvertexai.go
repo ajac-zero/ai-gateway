@@ -135,6 +135,12 @@ func validateAnthropicToGCPVertexAIRequest(body *anthropic.MessagesRequest) erro
 	if body.MaxTokens <= 0 || body.MaxTokens > maxInt32 || math.Trunc(body.MaxTokens) != body.MaxTokens {
 		return fmt.Errorf("%w: max_tokens must be a positive integer within the GCP Vertex AI supported range", internalapi.ErrInvalidRequestBody)
 	}
+	if body.Temperature != nil && (math.IsNaN(*body.Temperature) || math.IsInf(*body.Temperature, 0) || *body.Temperature < 0 || *body.Temperature > 1) {
+		return fmt.Errorf("%w: temperature must be between 0 and 1", internalapi.ErrInvalidRequestBody)
+	}
+	if body.TopP != nil && (math.IsNaN(*body.TopP) || math.IsInf(*body.TopP, 0) || *body.TopP < 0 || *body.TopP > 1) {
+		return fmt.Errorf("%w: top_p must be between 0 and 1", internalapi.ErrInvalidRequestBody)
+	}
 	if body.TopK != nil && (*body.TopK < 0 || float64(float32(*body.TopK)) != float64(*body.TopK)) {
 		return fmt.Errorf("%w: top_k must be a non-negative integer exactly representable by GCP Vertex AI", internalapi.ErrInvalidRequestBody)
 	}
