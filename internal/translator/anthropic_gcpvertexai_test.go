@@ -290,6 +290,15 @@ func TestAnthropicToGCPVertexAI_RequestBodyRejectsCacheControl(t *testing.T) {
 		{name: "tool result", configure: func(req *anthropicschema.MessagesRequest) {
 			req.Messages[0].Content = anthropicschema.MessageContent{Array: []anthropicschema.ContentBlockParam{{ToolResult: &anthropicschema.ToolResultBlockParam{Type: "tool_result", ToolUseID: "tool-1", CacheControl: cacheControl}}}}
 		}},
+		{name: "tool result text", configure: func(req *anthropicschema.MessagesRequest) {
+			req.Messages[0].Content = anthropicschema.MessageContent{Array: []anthropicschema.ContentBlockParam{{ToolResult: &anthropicschema.ToolResultBlockParam{
+				Type:      "tool_result",
+				ToolUseID: "tool-1",
+				Content: &anthropicschema.ToolResultContent{Array: []anthropicschema.ToolResultContentItem{{
+					Text: &anthropicschema.TextBlockParam{Type: "text", Text: "result", CacheControl: cacheControl},
+				}}},
+			}}}}
+		}},
 		{name: "tool declaration", configure: func(req *anthropicschema.MessagesRequest) {
 			req.Tools = []anthropicschema.ToolUnion{{Tool: &anthropicschema.Tool{Type: "custom", Name: "tool", InputSchema: anthropicschema.ToolInputSchema{Type: "object"}, CacheControl: cacheControl}}}
 		}},
