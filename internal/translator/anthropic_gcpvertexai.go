@@ -247,6 +247,9 @@ func validateAnthropicToolResultForGCPVertexAI(toolResult *anthropic.ToolResultB
 		return nil
 	}
 	for _, item := range toolResult.Content.Array {
+		if item.Text != nil && item.Text.CacheControl != nil {
+			return fmt.Errorf("%w: tool_result text cache_control is not supported for GCP Vertex AI translation", internalapi.ErrInvalidRequestBody)
+		}
 		if item.Image != nil || item.Document != nil || item.SearchResult != nil {
 			return fmt.Errorf("%w: tool_result image, document, and search_result content are not supported for GCP Vertex AI translation", internalapi.ErrInvalidRequestBody)
 		}
