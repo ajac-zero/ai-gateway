@@ -230,6 +230,23 @@ func TestAnthropicToGCPVertexAI_RequestBodyRejectsBuiltInTools(t *testing.T) {
 	require.ErrorContains(t, err, "Anthropic built-in tool unsupported")
 }
 
+func TestAnthropicToGCPVertexAI_RequestBodyRejectsDisabledParallelToolUse(t *testing.T) {
+	disableParallelToolUse := true
+	req := &anthropicschema.MessagesRequest{
+		Model:     "gemini-1.5-pro",
+		MaxTokens: 100,
+		Messages:  []anthropicschema.MessageParam{{Role: anthropicschema.MessageRoleUser, Content: anthropicschema.MessageContent{Text: "Use a tool"}}},
+		ToolChoice: &anthropicschema.ToolChoice{Auto: &anthropicschema.ToolChoiceAuto{
+			Type:                   "auto",
+			DisableParallelToolUse: &disableParallelToolUse,
+		}},
+	}
+
+	tr := NewAnthropicToGCPVertexAITranslator("")
+	_, _, err := tr.RequestBody(nil, req, false)
+	require.ErrorContains(t, err, "disable_parallel_tool_use is not supported")
+}
+
 func TestAnthropicToGCPVertexAI_RequestBodyReplaysThinkingSignature(t *testing.T) {
 	req := &anthropicschema.MessagesRequest{
 		Model:     "gemini-2.5-pro",

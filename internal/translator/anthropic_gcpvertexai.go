@@ -138,6 +138,20 @@ func validateAnthropicToGCPVertexAIRequest(body *anthropic.MessagesRequest) erro
 	if body.TopK != nil && (*body.TopK < 0 || float64(float32(*body.TopK)) != float64(*body.TopK)) {
 		return fmt.Errorf("%w: top_k must be a non-negative integer exactly representable by GCP Vertex AI", internalapi.ErrInvalidRequestBody)
 	}
+	if body.ToolChoice != nil {
+		var disableParallelToolUse *bool
+		switch {
+		case body.ToolChoice.Auto != nil:
+			disableParallelToolUse = body.ToolChoice.Auto.DisableParallelToolUse
+		case body.ToolChoice.Any != nil:
+			disableParallelToolUse = body.ToolChoice.Any.DisableParallelToolUse
+		case body.ToolChoice.Tool != nil:
+			disableParallelToolUse = body.ToolChoice.Tool.DisableParallelToolUse
+		}
+		if disableParallelToolUse != nil && *disableParallelToolUse {
+			return fmt.Errorf("%w: disable_parallel_tool_use is not supported for GCP Vertex AI translation", internalapi.ErrInvalidRequestBody)
+		}
+	}
 	if body.Thinking != nil {
 		if body.Thinking.Adaptive != nil {
 			return fmt.Errorf("%w: Anthropic thinking type adaptive is not supported for GCP Vertex AI", internalapi.ErrInvalidRequestBody)
