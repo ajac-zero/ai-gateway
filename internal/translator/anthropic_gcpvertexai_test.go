@@ -76,6 +76,36 @@ func TestAnthropicToGCPVertexAI_RequestBodyWithImage(t *testing.T) {
 	}`, string(body))
 }
 
+func TestAnthropicToGCPVertexAI_RequestBodyRejectsInvalidImageSource(t *testing.T) {
+	tests := []struct {
+		name        string
+		source      anthropicschema.ImageSource
+		wantMessage string
+	}{
+		{name: "unknown source", source: anthropicschema.ImageSource{}, wantMessage: "image source type is not supported"},
+		{name: "empty URL", source: anthropicschema.ImageSource{URL: &anthropicschema.URLImageSource{Type: "url"}}, wantMessage: "image URL must not be empty"},
+		{name: "empty base64 data", source: anthropicschema.ImageSource{Base64: &anthropicschema.Base64ImageSource{Type: "base64", MediaType: "image/png"}}, wantMessage: "base64 image media_type and data are required"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &anthropicschema.MessagesRequest{
+				Model:     "gemini-1.5-pro",
+				MaxTokens: 100,
+				Messages: []anthropicschema.MessageParam{{
+					Role: anthropicschema.MessageRoleUser,
+					Content: anthropicschema.MessageContent{Array: []anthropicschema.ContentBlockParam{{
+						Image: &anthropicschema.ImageBlockParam{Type: "image", Source: tt.source},
+					}}},
+				}},
+			}
+			tr := NewAnthropicToGCPVertexAITranslator("")
+			_, _, err := tr.RequestBody(nil, req, false)
+			require.ErrorContains(t, err, tt.wantMessage)
+		})
+	}
+}
+
 func TestAnthropicToGCPVertexAI_RequestBodyRejectsUnsupportedContent(t *testing.T) {
 	req := &anthropicschema.MessagesRequest{
 		Model:     "gemini-1.5-pro",
