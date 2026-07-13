@@ -152,6 +152,13 @@ func validateAnthropicToGCPVertexAIRequest(body *anthropic.MessagesRequest) erro
 			return fmt.Errorf("%w: disable_parallel_tool_use is not supported for GCP Vertex AI translation", internalapi.ErrInvalidRequestBody)
 		}
 	}
+	if body.System != nil {
+		for i := range body.System.Texts {
+			if body.System.Texts[i].CacheControl != nil {
+				return fmt.Errorf("%w: system block %d cache_control is not supported for GCP Vertex AI translation", internalapi.ErrInvalidRequestBody, i)
+			}
+		}
+	}
 	if body.Thinking != nil {
 		if body.Thinking.Adaptive != nil {
 			return fmt.Errorf("%w: Anthropic thinking type adaptive is not supported for GCP Vertex AI", internalapi.ErrInvalidRequestBody)
@@ -167,6 +174,9 @@ func validateAnthropicToGCPVertexAIRequest(body *anthropic.MessagesRequest) erro
 		if body.Tools[i].Tool == nil {
 			return fmt.Errorf("%w: tool %d uses an Anthropic built-in tool unsupported by GCP Vertex AI translation", internalapi.ErrInvalidRequestBody, i)
 		}
+		if body.Tools[i].Tool.CacheControl != nil {
+			return fmt.Errorf("%w: tool %d cache_control is not supported for GCP Vertex AI translation", internalapi.ErrInvalidRequestBody, i)
+		}
 	}
 	for i, msg := range body.Messages {
 		for j, block := range msg.Content.Array {
@@ -181,15 +191,24 @@ func validateAnthropicToGCPVertexAIRequest(body *anthropic.MessagesRequest) erro
 func validateAnthropicContentBlockForGCPVertexAI(role anthropic.MessageRole, block *anthropic.ContentBlockParam) error {
 	switch {
 	case block.Text != nil:
+		if block.Text.CacheControl != nil {
+			return fmt.Errorf("%w: text cache_control is not supported for GCP Vertex AI translation", internalapi.ErrInvalidRequestBody)
+		}
 		return nil
 	case block.Image != nil:
 		if role != anthropic.MessageRoleUser {
 			return fmt.Errorf("%w: image content is only supported in user messages for GCP Vertex AI", internalapi.ErrInvalidRequestBody)
 		}
+		if block.Image.CacheControl != nil {
+			return fmt.Errorf("%w: image cache_control is not supported for GCP Vertex AI translation", internalapi.ErrInvalidRequestBody)
+		}
 		return nil
 	case block.ToolUse != nil:
 		if role != anthropic.MessageRoleAssistant {
 			return fmt.Errorf("%w: tool_use content is only supported in assistant messages", internalapi.ErrInvalidRequestBody)
+		}
+		if block.ToolUse.CacheControl != nil {
+			return fmt.Errorf("%w: tool_use cache_control is not supported for GCP Vertex AI translation", internalapi.ErrInvalidRequestBody)
 		}
 		return nil
 	case block.ToolResult != nil:
@@ -220,6 +239,9 @@ func validateAnthropicContentBlockForGCPVertexAI(role anthropic.MessageRole, blo
 func validateAnthropicToolResultForGCPVertexAI(toolResult *anthropic.ToolResultBlockParam) error {
 	if toolResult.IsError {
 		return fmt.Errorf("%w: tool_result is_error is not supported for GCP Vertex AI translation", internalapi.ErrInvalidRequestBody)
+	}
+	if toolResult.CacheControl != nil {
+		return fmt.Errorf("%w: tool_result cache_control is not supported for GCP Vertex AI translation", internalapi.ErrInvalidRequestBody)
 	}
 	if toolResult.Content == nil {
 		return nil

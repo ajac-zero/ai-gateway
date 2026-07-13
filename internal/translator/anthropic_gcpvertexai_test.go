@@ -269,6 +269,47 @@ func TestAnthropicToGCPVertexAI_RequestBodyRejectsErrorToolResult(t *testing.T) 
 	require.ErrorContains(t, err, "tool_result is_error is not supported")
 }
 
+func TestAnthropicToGCPVertexAI_RequestBodyRejectsCacheControl(t *testing.T) {
+	cacheControl := &anthropicschema.CacheControl{Ephemeral: &anthropicschema.CacheControlEphemeral{Type: "ephemeral"}}
+	tests := []struct {
+		name      string
+		configure func(*anthropicschema.MessagesRequest)
+	}{
+		{name: "system", configure: func(req *anthropicschema.MessagesRequest) {
+			req.System = &anthropicschema.SystemPrompt{Texts: []anthropicschema.TextBlockParam{{Type: "text", Text: "system", CacheControl: cacheControl}}}
+		}},
+		{name: "text", configure: func(req *anthropicschema.MessagesRequest) {
+			req.Messages[0].Content = anthropicschema.MessageContent{Array: []anthropicschema.ContentBlockParam{{Text: &anthropicschema.TextBlockParam{Type: "text", Text: "Hello", CacheControl: cacheControl}}}}
+		}},
+		{name: "image", configure: func(req *anthropicschema.MessagesRequest) {
+			req.Messages[0].Content = anthropicschema.MessageContent{Array: []anthropicschema.ContentBlockParam{{Image: &anthropicschema.ImageBlockParam{Type: "image", Source: anthropicschema.ImageSource{URL: &anthropicschema.URLImageSource{Type: "url", URL: "https://example.com/image.png"}}, CacheControl: cacheControl}}}}
+		}},
+		{name: "tool use", configure: func(req *anthropicschema.MessagesRequest) {
+			req.Messages[0] = anthropicschema.MessageParam{Role: anthropicschema.MessageRoleAssistant, Content: anthropicschema.MessageContent{Array: []anthropicschema.ContentBlockParam{{ToolUse: &anthropicschema.ToolUseBlockParam{Type: "tool_use", ID: "tool-1", Name: "tool", Input: map[string]any{}, CacheControl: cacheControl}}}}}
+		}},
+		{name: "tool result", configure: func(req *anthropicschema.MessagesRequest) {
+			req.Messages[0].Content = anthropicschema.MessageContent{Array: []anthropicschema.ContentBlockParam{{ToolResult: &anthropicschema.ToolResultBlockParam{Type: "tool_result", ToolUseID: "tool-1", CacheControl: cacheControl}}}}
+		}},
+		{name: "tool declaration", configure: func(req *anthropicschema.MessagesRequest) {
+			req.Tools = []anthropicschema.ToolUnion{{Tool: &anthropicschema.Tool{Type: "custom", Name: "tool", InputSchema: anthropicschema.ToolInputSchema{Type: "object"}, CacheControl: cacheControl}}}
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &anthropicschema.MessagesRequest{
+				Model:     "gemini-1.5-pro",
+				MaxTokens: 100,
+				Messages:  []anthropicschema.MessageParam{{Role: anthropicschema.MessageRoleUser, Content: anthropicschema.MessageContent{Text: "Hello"}}},
+			}
+			tt.configure(req)
+			tr := NewAnthropicToGCPVertexAITranslator("")
+			_, _, err := tr.RequestBody(nil, req, false)
+			require.ErrorContains(t, err, "cache_control is not supported")
+		})
+	}
+}
+
 func TestAnthropicToGCPVertexAI_RequestBodyReplaysThinkingSignature(t *testing.T) {
 	req := &anthropicschema.MessagesRequest{
 		Model:     "gemini-2.5-pro",
