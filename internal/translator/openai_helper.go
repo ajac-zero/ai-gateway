@@ -636,7 +636,9 @@ type sseMessageDeltaBody struct {
 }
 
 type sseOutputUsage struct {
-	OutputTokens int `json:"output_tokens"`
+	InputTokens          *int `json:"input_tokens,omitempty"`
+	CacheReadInputTokens *int `json:"cache_read_input_tokens,omitempty"`
+	OutputTokens         int  `json:"output_tokens"`
 }
 
 type sseMessageStop struct {
@@ -645,20 +647,22 @@ type sseMessageStop struct {
 
 // openAIStreamToAnthropicState tracks the state for converting OpenAI SSE chunks to Anthropic SSE events.
 type openAIStreamToAnthropicState struct {
-	buffer           bytes.Buffer
-	messageStarted   bool // flag indicating emitted message_start
-	hasOpenBlock     bool // flag indicating emitted content_block_start but not content_block_stop
-	hasThinkingBlock bool // flag indicating the open block is a thinking block
-	closingEmitted   bool // flag indicating emitted content_block_stop + message_delta + message_stop
-	messageID        string
-	model            string
-	stopReason       string // Anthropic stop_reason, mapped from OpenAI finish_reason
-	inputTokens      int
-	outputTokens     int
-	tokenUsage       metrics.TokenUsage
-	blockIndex       int                       // current Anthropic content block index
-	activeTools      map[int64]*streamToolCall // keyed by OpenAI tool_call index
-	requestModel     string
+	buffer            bytes.Buffer
+	messageStarted    bool // flag indicating emitted message_start
+	hasOpenBlock      bool // flag indicating emitted content_block_start but not content_block_stop
+	hasThinkingBlock  bool // flag indicating the open block is a thinking block
+	closingEmitted    bool // flag indicating emitted content_block_stop + message_delta + message_stop
+	messageID         string
+	model             string
+	stopReason        string // Anthropic stop_reason, mapped from OpenAI finish_reason
+	inputTokens       int
+	cacheReadTokens   int
+	outputTokens      int
+	tokenUsage        metrics.TokenUsage
+	includeInputUsage bool
+	blockIndex        int                       // current Anthropic content block index
+	activeTools       map[int64]*streamToolCall // keyed by OpenAI tool_call index
+	requestModel      string
 }
 
 type streamToolCall struct {
@@ -744,6 +748,9 @@ func (s *openAIStreamToAnthropicState) handleChunk(chunk *openai.ChatCompletionR
 	if len(chunk.Choices) == 0 && chunk.Usage != nil {
 		s.inputTokens = chunk.Usage.PromptTokens
 		s.outputTokens = chunk.Usage.CompletionTokens
+		if chunk.Usage.PromptTokensDetails != nil {
+			s.cacheReadTokens = chunk.Usage.PromptTokensDetails.CachedTokens
+		}
 		s.tokenUsage = metrics.ExtractTokenUsageFromExplicitCaching(
 			int64(s.inputTokens),
 			int64(s.outputTokens),
@@ -1057,10 +1064,16 @@ func (s *openAIStreamToAnthropicState) emitClosingEvents(out *[]byte) error {
 	}
 
 	// Emit message_delta with stop_reason and final output token count.
+	usage := sseOutputUsage{OutputTokens: s.outputTokens}
+	if s.includeInputUsage {
+		inputTokens := max(s.inputTokens-s.cacheReadTokens, 0)
+		usage.InputTokens = &inputTokens
+		usage.CacheReadInputTokens = &s.cacheReadTokens
+	}
 	msgDeltaPayload := sseMessageDelta{
 		Type:  "message_delta",
 		Delta: sseMessageDeltaBody{StopReason: stopReason, StopSequence: nil},
-		Usage: sseOutputUsage{OutputTokens: s.outputTokens},
+		Usage: usage,
 	}
 	data, err := json.Marshal(msgDeltaPayload)
 	if err != nil {
