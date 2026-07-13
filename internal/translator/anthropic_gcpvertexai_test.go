@@ -478,6 +478,29 @@ func TestAnthropicToGCPVertexAI_ResponseBodyStreaming(t *testing.T) {
 	require.Zero(t, cacheCreationTokens)
 }
 
+func TestAnthropicToGCPVertexAI_ResponseBodyStreamingWithoutCandidates(t *testing.T) {
+	tr := NewAnthropicToGCPVertexAITranslator("gemini-1.5-pro")
+	_, _, err := tr.RequestBody(nil, &anthropicschema.MessagesRequest{
+		Model:     "ignored",
+		Stream:    true,
+		MaxTokens: 100,
+		Messages:  []anthropicschema.MessageParam{{Role: anthropicschema.MessageRoleUser, Content: anthropicschema.MessageContent{Text: "Hello"}}},
+	}, false)
+	require.NoError(t, err)
+
+	streamBody := `data: {"responseId":"resp-blocked","promptFeedback":{"blockReason":"SAFETY"},"usageMetadata":{"promptTokenCount":10,"totalTokenCount":10}}
+
+`
+	_, body, _, _, err := tr.ResponseBody(nil, strings.NewReader(streamBody), true, nil)
+	require.NoError(t, err)
+
+	events := parseSSEEventsFromBytes(body)
+	require.Len(t, events, 3)
+	require.Equal(t, "message_start", events[0].eventType)
+	require.Equal(t, "message_delta", events[1].eventType)
+	require.Equal(t, "message_stop", events[2].eventType)
+}
+
 func TestAnthropicToGCPVertexAI_ResponseErrorUnknownJSON(t *testing.T) {
 	tr := NewAnthropicToGCPVertexAITranslator("gemini-1.5-pro")
 	headers, body, err := tr.ResponseError(map[string]string{statusHeaderName: "503"}, strings.NewReader(`{"unexpected":"shape"}`))
