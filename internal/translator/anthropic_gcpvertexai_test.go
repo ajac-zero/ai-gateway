@@ -255,6 +255,7 @@ func TestAnthropicToGCPVertexAI_ResponseBodyStreaming(t *testing.T) {
 	require.Contains(t, out, "event: content_block_start")
 	require.Contains(t, out, `"type":"text_delta","text":"Hello"`)
 	require.Contains(t, out, `"stop_reason":"end_turn"`)
+	require.Contains(t, out, `"usage":{"input_tokens":7,"cache_read_input_tokens":3,"output_tokens":5}`)
 	require.Contains(t, out, "event: message_stop")
 	inputTokens, ok := tokenUsage.InputTokens()
 	require.True(t, ok)
