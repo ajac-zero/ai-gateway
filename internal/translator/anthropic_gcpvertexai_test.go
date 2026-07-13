@@ -419,6 +419,12 @@ func TestAnthropicToGCPVertexAI_ResponseBodyNonStreaming(t *testing.T) {
 	outputTokens, ok := tokenUsage.OutputTokens()
 	require.True(t, ok)
 	require.Equal(t, uint32(15), outputTokens)
+	cachedTokens, ok := tokenUsage.CachedInputTokens()
+	require.True(t, ok)
+	require.Equal(t, uint32(3), cachedTokens)
+	cacheCreationTokens, ok := tokenUsage.CacheCreationInputTokens()
+	require.True(t, ok)
+	require.Zero(t, cacheCreationTokens)
 }
 
 func TestAnthropicToGCPVertexAI_ResponseHeadersStreaming(t *testing.T) {
@@ -464,6 +470,12 @@ func TestAnthropicToGCPVertexAI_ResponseBodyStreaming(t *testing.T) {
 	outputTokens, ok := tokenUsage.OutputTokens()
 	require.True(t, ok)
 	require.Equal(t, uint32(5), outputTokens)
+	cachedTokens, ok := tokenUsage.CachedInputTokens()
+	require.True(t, ok)
+	require.Equal(t, uint32(3), cachedTokens)
+	cacheCreationTokens, ok := tokenUsage.CacheCreationInputTokens()
+	require.True(t, ok)
+	require.Zero(t, cacheCreationTokens)
 }
 
 func TestAnthropicToGCPVertexAI_ResponseErrorUnknownJSON(t *testing.T) {
