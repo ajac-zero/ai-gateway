@@ -108,6 +108,39 @@ func TestAnthropicToGCPVertexAI_RequestBodyRejectsAdaptiveThinking(t *testing.T)
 	require.ErrorContains(t, err, "thinking type adaptive is not supported")
 }
 
+func TestAnthropicToGCPVertexAI_RequestBodyRejectsUnsupportedOptions(t *testing.T) {
+	container := anthropicschema.Container("container-1")
+	contextManagement := anthropicschema.ContextManagement(map[string]any{"edits": []any{}})
+	serviceTier := anthropicschema.MessageServiceTierStandardOnly
+
+	tests := []struct {
+		name        string
+		configure   func(*anthropicschema.MessagesRequest)
+		wantMessage string
+	}{
+		{name: "container", configure: func(req *anthropicschema.MessagesRequest) { req.Container = &container }, wantMessage: "container is not supported"},
+		{name: "context management", configure: func(req *anthropicschema.MessagesRequest) { req.ContextManagement = &contextManagement }, wantMessage: "context_management is not supported"},
+		{name: "MCP servers", configure: func(req *anthropicschema.MessagesRequest) {
+			req.MCPServers = []anthropicschema.MCPServer{map[string]any{}}
+		}, wantMessage: "mcp_servers are not supported"},
+		{name: "service tier", configure: func(req *anthropicschema.MessagesRequest) { req.ServiceTier = &serviceTier }, wantMessage: "service_tier is not supported"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &anthropicschema.MessagesRequest{
+				Model:     "gemini-1.5-pro",
+				MaxTokens: 100,
+				Messages:  []anthropicschema.MessageParam{{Role: anthropicschema.MessageRoleUser, Content: anthropicschema.MessageContent{Text: "Hello"}}},
+			}
+			tt.configure(req)
+			tr := NewAnthropicToGCPVertexAITranslator("")
+			_, _, err := tr.RequestBody(nil, req, false)
+			require.ErrorContains(t, err, tt.wantMessage)
+		})
+	}
+}
+
 func TestAnthropicToGCPVertexAI_RequestBodyWithTools(t *testing.T) {
 	req := &anthropicschema.MessagesRequest{
 		Model:     "gemini-1.5-pro",
