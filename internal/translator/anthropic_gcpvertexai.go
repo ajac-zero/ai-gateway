@@ -127,6 +127,11 @@ func validateAnthropicToGCPVertexAIRequest(body *anthropic.MessagesRequest) erro
 			return fmt.Errorf("%w: Anthropic thinking budget_tokens exceeds supported range for GCP Vertex AI", internalapi.ErrInvalidRequestBody)
 		}
 	}
+	for i := range body.Tools {
+		if body.Tools[i].Tool == nil {
+			return fmt.Errorf("%w: tool %d uses an Anthropic built-in tool unsupported by GCP Vertex AI translation", internalapi.ErrInvalidRequestBody, i)
+		}
+	}
 	for i, msg := range body.Messages {
 		for j, block := range msg.Content.Array {
 			if err := validateAnthropicContentBlockForGCPVertexAI(msg.Role, &block); err != nil {
