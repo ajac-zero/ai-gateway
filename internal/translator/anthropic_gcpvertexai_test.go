@@ -148,6 +148,43 @@ func TestAnthropicToGCPVertexAI_RequestBodyWithTools(t *testing.T) {
 	}`, string(body))
 }
 
+func TestAnthropicToGCPVertexAI_RequestBodyReplaysThinkingSignature(t *testing.T) {
+	req := &anthropicschema.MessagesRequest{
+		Model:     "gemini-2.5-pro",
+		MaxTokens: 100,
+		Messages: []anthropicschema.MessageParam{
+			{
+				Role: anthropicschema.MessageRoleAssistant,
+				Content: anthropicschema.MessageContent{Array: []anthropicschema.ContentBlockParam{
+					{Thinking: &anthropicschema.ThinkingBlockParam{Type: "thinking", Thinking: "I should check the weather.", Signature: "dGVzdC1zaWduYXR1cmU="}},
+					{ToolUse: &anthropicschema.ToolUseBlockParam{Type: "tool_use", ID: "tool-1", Name: "get_weather", Input: map[string]any{"location": "Paris"}}},
+				}},
+			},
+			{
+				Role: anthropicschema.MessageRoleUser,
+				Content: anthropicschema.MessageContent{Array: []anthropicschema.ContentBlockParam{
+					{ToolResult: &anthropicschema.ToolResultBlockParam{Type: "tool_result", ToolUseID: "tool-1", Content: &anthropicschema.ToolResultContent{Text: "sunny"}}},
+				}},
+			},
+		},
+	}
+
+	tr := NewAnthropicToGCPVertexAITranslator("")
+	_, body, err := tr.RequestBody(nil, req, false)
+	require.NoError(t, err)
+	require.JSONEq(t, `{
+		"contents":[
+			{"parts":[
+				{"functionCall":{"args":{"location":"Paris"},"name":"get_weather"},"thoughtSignature":"dGVzdC1zaWduYXR1cmU="},
+				{"text":"I should check the weather.","thought":true}
+			],"role":"model"},
+			{"parts":[{"functionResponse":{"name":"get_weather","response":{"output":"sunny"}}}],"role":"user"}
+		],
+		"tools":null,
+		"generationConfig":{"maxOutputTokens":100}
+	}`, string(body))
+}
+
 func TestAnthropicToGCPVertexAI_ResponseBodyNonStreaming(t *testing.T) {
 	tr := NewAnthropicToGCPVertexAITranslator("gemini-1.5-pro")
 	_, _, err := tr.RequestBody(nil, &anthropicschema.MessagesRequest{
