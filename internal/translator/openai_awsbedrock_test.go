@@ -2291,10 +2291,9 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_Streaming_WithReasoning(t 
 						choices, _ := untypedChunk["choices"].([]interface{})
 						choice, _ := choices[0].(map[string]interface{})
 						deltaMap, _ := choice["delta"].(map[string]interface{})
-						reasoningContent, ok := deltaMap["reasoning_content"].(map[string]interface{})
-						require.True(t, ok, "Delta should have a 'reasoning_content' map")
-						_, textOk := reasoningContent["text"]
-						require.True(t, textOk, "Reasoning content should have a 'text' key")
+						reasoningContent, ok := deltaMap["reasoning_content"].(string)
+						require.True(t, ok, "Delta should have a string 'reasoning_content'")
+						require.Equal(t, delta.ReasoningContent.Text, reasoningContent)
 					}
 				}
 			}
@@ -2436,23 +2435,23 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_Streaming_WithRedactedCont
 			err := json.Unmarshal([]byte(data), &chunk)
 			require.NoError(t, err)
 
-			if len(chunk.Choices) > 0 && chunk.Choices[0].Delta != nil && chunk.Choices[0].Delta.ReasoningContent != nil {
-				reasoning := chunk.Choices[0].Delta.ReasoningContent
-				require.Equal(t, redactedBytes, reasoning.RedactedContent)
-				require.Empty(t, reasoning.Text)
-				foundReasoningChunk = true
+			var untypedChunk map[string]interface{}
+			err = json.Unmarshal([]byte(data), &untypedChunk)
+			require.NoError(t, err)
 
-				var untypedChunk map[string]interface{}
-				err = json.Unmarshal([]byte(data), &untypedChunk)
-				require.NoError(t, err)
-
-				choices, _ := untypedChunk["choices"].([]interface{})
-				choice, _ := choices[0].(map[string]interface{})
-				deltaMap, _ := choice["delta"].(map[string]interface{})
-				reasoningContent, ok := deltaMap["reasoning_content"].(map[string]interface{})
-				require.True(t, ok, "Delta should have a 'reasoning_content' map")
-				_, redactedOk := reasoningContent["redactedContent"]
-				require.True(t, redactedOk, "Reasoning content should have a 'redactedContent' key")
+			choices, _ := untypedChunk["choices"].([]interface{})
+			choice, _ := choices[0].(map[string]interface{})
+			deltaMap, _ := choice["delta"].(map[string]interface{})
+			blocks, ok := deltaMap["thinking_blocks"].([]interface{})
+			if !ok {
+				continue
+			}
+			for _, value := range blocks {
+				block, _ := value.(map[string]interface{})
+				if block["type"] == "redacted_thinking" {
+					foundReasoningChunk = true
+					require.NotEmpty(t, block["data"])
+				}
 			}
 		}
 	}
