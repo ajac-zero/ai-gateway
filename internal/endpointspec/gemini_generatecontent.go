@@ -63,8 +63,10 @@ func (s GenerateContentEndpointSpec) GetTranslator(
 	switch schema.Name {
 	case filterapi.APISchemaGCPVertexAI:
 		return translator.NewGeminiToGCPVertexAITranslator(effectiveModel, s.Streaming), nil
+	case filterapi.APISchemaGoogleAIStudio:
+		return translator.NewGeminiToGoogleAIStudioTranslator(schema.Version, effectiveModel, s.Streaming), nil
 	default:
-		return nil, fmt.Errorf("Gemini native endpoint only supports GCPVertexAI backend, got: %s", schema.Name)
+		return nil, fmt.Errorf("Gemini native endpoint only supports GCPVertexAI and GoogleAIStudio backends, got: %s", schema.Name)
 	}
 }
 
