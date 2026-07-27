@@ -36,9 +36,8 @@ func TestParseEndpointPrefixes_UnknownKey(t *testing.T) {
 }
 
 func TestParseEndpointPrefixes_EmptyValue(t *testing.T) {
-	ep, err := ParseEndpointPrefixes("openai:")
-	require.NoError(t, err)
-	require.Empty(t, ep.OpenAI)
+	_, err := ParseEndpointPrefixes("openai:")
+	require.ErrorContains(t, err, "empty endpointPrefixes value")
 }
 
 func TestParseEndpointPrefixes_MissingColon(t *testing.T) {
