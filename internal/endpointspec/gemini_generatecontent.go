@@ -65,8 +65,10 @@ func (s GenerateContentEndpointSpec) GetTranslator(
 		return translator.NewGeminiToGCPVertexAITranslator(effectiveModel, s.Streaming), nil
 	case filterapi.APISchemaGoogleAIStudio:
 		return translator.NewGeminiToGoogleAIStudioTranslator(schema.Version, effectiveModel, s.Streaming), nil
+	case filterapi.APISchemaOpenAI:
+		return translator.NewGeminiToOpenAITranslator(schema.OpenAIPrefix(), effectiveModel, s.Streaming), nil
 	default:
-		return nil, fmt.Errorf("Gemini native endpoint only supports GCPVertexAI and GoogleAIStudio backends, got: %s", schema.Name)
+		return nil, fmt.Errorf("unsupported backend for Gemini native endpoint: %s", schema.Name)
 	}
 }
 

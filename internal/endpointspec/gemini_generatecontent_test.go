@@ -32,8 +32,12 @@ func TestGenerateContentEndpointSpec(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, tr)
 
-	_, err = spec.GetTranslator(filterapi.VersionedAPISchema{Name: filterapi.APISchemaOpenAI}, "")
-	require.ErrorContains(t, err, "only supports GCPVertexAI and GoogleAIStudio")
+	tr, err = spec.GetTranslator(filterapi.VersionedAPISchema{Name: filterapi.APISchemaOpenAI, Prefix: "v1"}, "gpt-4o")
+	require.NoError(t, err)
+	require.NotNil(t, tr)
+
+	_, err = spec.GetTranslator(filterapi.VersionedAPISchema{Name: filterapi.APISchemaAnthropic}, "")
+	require.ErrorContains(t, err, "unsupported backend")
 }
 
 func TestGenerateContentEndpointSpecMalformedBody(t *testing.T) {
