@@ -211,8 +211,13 @@ func translateCustomResourceObjects(
 	securityPolicies egv1a1.SecurityPolicyList,
 	err error,
 ) {
+	secretObjects := make([]client.Object, len(usedDefinedSecrets))
+	for i, secret := range usedDefinedSecrets {
+		secretObjects[i] = secret
+	}
 	builder := fake.NewClientBuilder().
 		WithScheme(controller.Scheme).
+		WithObjects(secretObjects...).
 		WithStatusSubresource(&aigv1b1.AIGatewayRoute{}).
 		WithStatusSubresource(&aigv1b1.MCPRoute{}).
 		WithStatusSubresource(&aigv1b1.AIServiceBackend{}).
@@ -264,11 +269,29 @@ func translateCustomResourceObjects(
 	for _, btp := range backendTLSPolicies {
 		mustCreate(ctx, fakeClient, btp, logger)
 	}
+	for _, backend := range aigwBackends {
+		mustCreateAndReconcile(ctx, fakeClient, backend, aisbC, logger)
+	}
 	for _, bsp := range backendSecurityPolicies {
 		mustCreateAndReconcile(ctx, fakeClient, bsp, bspC, logger)
 	}
-	for _, backend := range aigwBackends {
-		mustCreateAndReconcile(ctx, fakeClient, backend, aisbC, logger)
+	// BackendSecurityPolicy rotators write generated credential secrets through
+	// the controller-runtime client. Gateway auth resolution reads them through
+	// the typed clientset, so mirror generated secrets before continuing.
+	generatedSecrets := &corev1.SecretList{}
+	if listErr := fakeClient.List(ctx, generatedSecrets); listErr != nil {
+		err = fmt.Errorf("error listing generated Secrets: %w", listErr)
+		return
+	}
+	for i := range generatedSecrets.Items {
+		secret := generatedSecrets.Items[i].DeepCopy()
+		if _, isUserDefined := userDefinedSecretKeys[fmt.Sprintf("%s/%s", secret.Namespace, secret.Name)]; isUserDefined {
+			continue
+		}
+		if _, createErr := fakeClientSet.CoreV1().Secrets(secret.Namespace).Create(ctx, secret, metav1.CreateOptions{}); createErr != nil && !apierrors.IsAlreadyExists(createErr) {
+			err = fmt.Errorf("error mirroring generated Secret %s/%s: %w", secret.Namespace, secret.Name, createErr)
+			return
+		}
 	}
 	for _, route := range aigwRoutes {
 		mustCreateAndReconcile(ctx, fakeClient, route, airC, logger)
