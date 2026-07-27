@@ -480,6 +480,9 @@ func TestTokenizeEndpointSpec_GetTranslator(t *testing.T) {
 	spec := TokenizeEndpointSpec{}
 	supported := []filterapi.VersionedAPISchema{
 		{Name: filterapi.APISchemaOpenAI},
+		{Name: filterapi.APISchemaGCPVertexAI},
+		{Name: filterapi.APISchemaGCPAnthropic},
+		{Name: filterapi.APISchemaAWSAnthropic},
 	}
 
 	for _, schema := range supported {
