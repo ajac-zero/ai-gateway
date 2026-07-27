@@ -200,7 +200,8 @@ type EndpointPrefixes struct {
 //
 //	"openai:/,cohere:/cohere,anthropic:/anthropic,gemini:/v1beta"
 //
-// Unknown keys cause an error; values must be non-empty.
+// Unknown keys cause an error. An empty value removes that provider's extra
+// path prefix, such as openai: for OpenAI-compatible /v1 endpoints.
 func ParseEndpointPrefixes(s string) (EndpointPrefixes, error) {
 	out := EndpointPrefixes{
 		OpenAI:    "/",
@@ -226,10 +227,6 @@ func ParseEndpointPrefixes(s string) (EndpointPrefixes, error) {
 
 		key := strings.TrimSpace(parts[0])
 		value := strings.TrimSpace(parts[1])
-		if value == "" {
-			return EndpointPrefixes{}, fmt.Errorf("empty endpointPrefixes value for key %q at position %d", key, i+1)
-		}
-
 		switch key {
 		case "openai":
 			out.OpenAI = value
