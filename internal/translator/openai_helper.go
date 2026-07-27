@@ -211,66 +211,70 @@ func appendAnthropicUserMessage(messages []openai.ChatCompletionMessageParamUnio
 		})
 	}
 
-	// Build structured content parts in a single pass. If image blocks are present,
-	// use the structured array format; otherwise, fall back to plain string for compatibility.
-	var parts []openai.ChatCompletionContentPartUserUnionParam
-	hasImages := false
-	for _, block := range msg.Content.Array {
-		switch {
-		case block.Text != nil:
-			parts = append(parts, openai.ChatCompletionContentPartUserUnionParam{
-				OfText: &openai.ChatCompletionContentPartTextParam{
-					Type: string(openai.ChatCompletionContentPartTextTypeText),
-					Text: block.Text.Text,
-				},
-			})
-		case block.Image != nil:
-			hasImages = true
-			url := anthropicImageSourceToURL(block.Image.Source)
-			parts = append(parts, openai.ChatCompletionContentPartUserUnionParam{
-				OfImageURL: &openai.ChatCompletionContentPartImageParam{
-					Type: openai.ChatCompletionContentPartImageTypeImageURL,
-					ImageURL: openai.ChatCompletionContentPartImageImageURLParam{
-						URL: url,
-					},
-				},
-			})
-		}
-	}
-	if hasImages {
-		if len(parts) > 0 {
-			messages = append(messages, openai.ChatCompletionMessageParamUnion{
-				OfUser: &openai.ChatCompletionUserMessageParam{
-					Content: openai.StringOrUserRoleContentUnion{Value: parts},
-					Role:    openai.ChatMessageRoleUser,
-				},
-			})
-		}
-	} else {
-		text := anthropicContentToText(msg.Content)
-		if text != "" {
-			messages = append(messages, openai.ChatCompletionMessageParamUnion{
-				OfUser: &openai.ChatCompletionUserMessageParam{
-					Content: openai.StringOrUserRoleContentUnion{Value: text},
-					Role:    openai.ChatMessageRoleUser,
-				},
-			})
-		}
+	// Emit user text if there is any non-tool-result content.
+	content, ok := anthropicUserContentToOpenAI(msg.Content)
+	if ok {
+		messages = append(messages, openai.ChatCompletionMessageParamUnion{
+			OfUser: &openai.ChatCompletionUserMessageParam{
+				Content: openai.StringOrUserRoleContentUnion{Value: content},
+				Role:    openai.ChatMessageRoleUser,
+			},
+		})
 	}
 
 	return messages
 }
 
-// anthropicImageSourceToURL converts an Anthropic ImageSource to an OpenAI-compatible URL.
-func anthropicImageSourceToURL(source anthropic.ImageSource) string {
-	switch {
-	case source.Base64 != nil:
-		return fmt.Sprintf("data:%s;base64,%s", source.Base64.MediaType, source.Base64.Data)
-	case source.URL != nil:
-		return source.URL.URL
-	default:
-		return ""
+func anthropicUserContentToOpenAI(content anthropic.MessageContent) (any, bool) {
+	if content.Text != "" {
+		return content.Text, true
 	}
+
+	parts := make([]openai.ChatCompletionContentPartUserUnionParam, 0, len(content.Array))
+	var text strings.Builder
+	hasImage := false
+	for _, block := range content.Array {
+		switch {
+		case block.Text != nil:
+			if block.Text.Text != "" {
+				text.WriteString(block.Text.Text)
+				parts = append(parts, openai.ChatCompletionContentPartUserUnionParam{
+					OfText: &openai.ChatCompletionContentPartTextParam{
+						Type: string(openai.ChatCompletionContentPartTextTypeText),
+						Text: block.Text.Text,
+					},
+				})
+			}
+		case block.Image != nil:
+			imageURL := anthropicImageSourceToOpenAIURL(block.Image.Source)
+			hasImage = true
+			parts = append(parts, openai.ChatCompletionContentPartUserUnionParam{
+				OfImageURL: &openai.ChatCompletionContentPartImageParam{
+					Type: openai.ChatCompletionContentPartImageTypeImageURL,
+					ImageURL: openai.ChatCompletionContentPartImageImageURLParam{
+						URL: imageURL,
+					},
+				},
+			})
+		}
+	}
+	if len(parts) == 0 {
+		return "", false
+	}
+	if !hasImage {
+		return text.String(), true
+	}
+	return parts, true
+}
+
+func anthropicImageSourceToOpenAIURL(source anthropic.ImageSource) string {
+	if source.URL != nil {
+		return source.URL.URL
+	}
+	if source.Base64 != nil {
+		return fmt.Sprintf("data:%s;base64,%s", source.Base64.MediaType, source.Base64.Data)
+	}
+	return ""
 }
 
 // toolResultToText extracts text from a ToolResultBlockParam.
@@ -630,7 +634,9 @@ type sseMessageDeltaBody struct {
 }
 
 type sseOutputUsage struct {
-	OutputTokens int `json:"output_tokens"`
+	InputTokens          *int `json:"input_tokens,omitempty"`
+	CacheReadInputTokens *int `json:"cache_read_input_tokens,omitempty"`
+	OutputTokens         int  `json:"output_tokens"`
 }
 
 type sseMessageStop struct {
@@ -639,20 +645,22 @@ type sseMessageStop struct {
 
 // openAIStreamToAnthropicState tracks the state for converting OpenAI SSE chunks to Anthropic SSE events.
 type openAIStreamToAnthropicState struct {
-	buffer           bytes.Buffer
-	messageStarted   bool // flag indicating emitted message_start
-	hasOpenBlock     bool // flag indicating emitted content_block_start but not content_block_stop
-	hasThinkingBlock bool // flag indicating the open block is a thinking block
-	closingEmitted   bool // flag indicating emitted content_block_stop + message_delta + message_stop
-	messageID        string
-	model            string
-	stopReason       string // Anthropic stop_reason, mapped from OpenAI finish_reason
-	inputTokens      int
-	outputTokens     int
-	tokenUsage       metrics.TokenUsage
-	blockIndex       int                       // current Anthropic content block index
-	activeTools      map[int64]*streamToolCall // keyed by OpenAI tool_call index
-	requestModel     string
+	buffer            bytes.Buffer
+	messageStarted    bool // flag indicating emitted message_start
+	hasOpenBlock      bool // flag indicating emitted content_block_start but not content_block_stop
+	hasThinkingBlock  bool // flag indicating the open block is a thinking block
+	closingEmitted    bool // flag indicating emitted content_block_stop + message_delta + message_stop
+	messageID         string
+	model             string
+	stopReason        string // Anthropic stop_reason, mapped from OpenAI finish_reason
+	inputTokens       int
+	cacheReadTokens   int
+	outputTokens      int
+	tokenUsage        metrics.TokenUsage
+	includeInputUsage bool
+	blockIndex        int                       // current Anthropic content block index
+	activeTools       map[int64]*streamToolCall // keyed by OpenAI tool_call index
+	requestModel      string
 }
 
 type streamToolCall struct {
@@ -738,10 +746,17 @@ func (s *openAIStreamToAnthropicState) handleChunk(chunk *openai.ChatCompletionR
 	if len(chunk.Choices) == 0 && chunk.Usage != nil {
 		s.inputTokens = chunk.Usage.PromptTokens
 		s.outputTokens = chunk.Usage.CompletionTokens
+		if s.includeInputUsage && chunk.Usage.PromptTokensDetails != nil {
+			s.cacheReadTokens = chunk.Usage.PromptTokensDetails.CachedTokens
+		}
+		cacheReadTokens := int64(0)
+		if s.includeInputUsage {
+			cacheReadTokens = int64(s.cacheReadTokens)
+		}
 		s.tokenUsage = metrics.ExtractTokenUsageFromExplicitCaching(
 			int64(s.inputTokens),
 			int64(s.outputTokens),
-			ptr.To(int64(0)),
+			ptr.To(cacheReadTokens),
 			ptr.To(int64(0)),
 		)
 		return s.emitClosingEvents(out)
@@ -1036,6 +1051,11 @@ func (s *openAIStreamToAnthropicState) emitClosingEvents(out *[]byte) error {
 		return nil
 	}
 	s.closingEmitted = true
+	if !s.messageStarted {
+		if err := s.emitMessageStart(out); err != nil {
+			return err
+		}
+	}
 
 	// Close the currently open content block.
 	if s.hasOpenBlock {
@@ -1050,11 +1070,21 @@ func (s *openAIStreamToAnthropicState) emitClosingEvents(out *[]byte) error {
 		stopReason = string(anthropic.StopReasonEndTurn)
 	}
 
-	// Emit message_delta with stop_reason and final output token count.
+	// Backfill input_tokens here (not message_start): OpenAI doesn't report it until now.
+	usage := sseOutputUsage{OutputTokens: s.outputTokens}
+	if s.includeInputUsage {
+		inputTokens := max(s.inputTokens-s.cacheReadTokens, 0)
+		usage.InputTokens = &inputTokens
+		usage.CacheReadInputTokens = &s.cacheReadTokens
+	} else {
+		// OpenAI cached_tokens is already included in prompt_tokens, so do not expose it
+		// as an additional Anthropic cache-read count for non-Vertex backends.
+		usage.InputTokens = &s.inputTokens
+	}
 	msgDeltaPayload := sseMessageDelta{
 		Type:  "message_delta",
 		Delta: sseMessageDeltaBody{StopReason: stopReason, StopSequence: nil},
-		Usage: sseOutputUsage{OutputTokens: s.outputTokens},
+		Usage: usage,
 	}
 	data, err := json.Marshal(msgDeltaPayload)
 	if err != nil {
