@@ -4,11 +4,11 @@ title: Supported API Endpoints
 sidebar_position: 9
 ---
 
-The Envoy AI Gateway provides OpenAI-compatible API endpoints as well as the Anthropic-compatible API for routing and managing LLM/AI traffic. This page documents which OpenAI API endpoints and Anthropic-compatible API endpoints are currently supported and their capabilities.
+The Envoy AI Gateway provides OpenAI-compatible API endpoints, the Anthropic-compatible API, and the native Gemini API for routing and managing LLM/AI traffic. This page documents which endpoints are currently supported and their capabilities.
 
 ## Overview
 
-The Envoy AI Gateway acts as a proxy that accepts OpenAI-compatible and Anthropic-compatible requests and routes them to various AI providers. While it maintains compatibility with the OpenAI API specification, it currently supports a subset of the full OpenAI API.
+The Envoy AI Gateway acts as a proxy that accepts OpenAI-compatible, Anthropic-compatible, and native Gemini API requests and routes them to various AI providers. While it maintains compatibility with these API specifications, it currently supports a subset of each full API.
 
 ## Supported Endpoints
 
@@ -16,14 +16,14 @@ The Envoy AI Gateway acts as a proxy that accepts OpenAI-compatible and Anthropi
 
 **Endpoint:** `POST /v1/chat/completions`
 
-**Status:** ✅ Fully Supported
+**Status:** Supported for native passthrough to Google Vertex AI
 
 **Description:** Create a chat completion response for the given conversation.
 
 **Features:**
 
 - ✅ Streaming and non-streaming responses
-- ✅ Function calling
+- ✅ Native request and response preservation, including function calling
 - ✅ Response format specification (including JSON schema)
 - ✅ Temperature, top_p, and other sampling parameters
 - ✅ System and user messages
@@ -182,6 +182,7 @@ curl -H "Content-Type: application/json" \
 
 - OpenAI
 - Any OpenAI-compatible provider that supports image generations
+- Google AI Studio (native Gemini `generateContent`), via the `GoogleAIStudio` backend schema. The Gemini image bytes returned as `inlineData` are base64-encoded into the OpenAI `b64_json` field.
 
 **Example:**
 
@@ -427,6 +428,78 @@ For OpenAI-compatible backends that natively support tokenization (e.g., vLLM), 
 - For **GCP Anthropic**: Configure with `GCPAnthropic` schema. Requests are translated to the Anthropic MessageCountTokens API via `rawPredict`. Completion prompts are automatically converted to chat messages. Model version suffixes (`@default`, `@latest`) are automatically stripped.
 - For **AWS Bedrock (Anthropic)**: Configure with `AWSAnthropic` schema. Requests are translated to the AWS Bedrock CountTokens API using the InvokeModel-style Anthropic Messages body. Completion prompts are automatically converted to chat messages. Cross-region inference (CRIS) model ID prefixes are automatically stripped.
 
+### Gemini Generate Content
+
+**Endpoint:** `POST /v1beta/models/{model}:generateContent`
+
+**Status:** ✅ Fully Supported
+
+**Description:** Generate content using the native Gemini API format. Clients such as Gemini CLI or the Google Generative AI SDK that target the Gemini API directly (not the OpenAI-compatible shim) can be pointed at the gateway without modification.
+
+**Features:**
+
+- ✅ Non-streaming responses
+- ✅ Function calling
+- ✅ Token usage tracking and cost calculation
+- ✅ System instructions
+- ✅ Safety settings and provider-specific fields
+- ✅ Model selection from URL path
+
+**Supported Providers:**
+
+- Google Vertex AI (with automatic path rewriting)
+
+**Example:**
+
+```bash
+curl -s -H "Content-Type: application/json" \
+  -d '{
+    "contents": [
+      {
+        "role": "user",
+        "parts": [{"text": "Hello, how are you?"}]
+      }
+    ]
+  }' \
+  $GATEWAY_URL/v1beta/models/gemini-3-flash-preview:generateContent
+```
+
+### Gemini Stream Generate Content
+
+**Endpoint:** `POST /v1beta/models/{model}:streamGenerateContent`
+
+**Status:** Supported for native passthrough to Google Vertex AI
+
+**Description:** Stream generated content using the native Gemini API format. Returns Server-Sent Events (SSE).
+
+**Features:**
+
+- ✅ Streaming responses (SSE)
+- ✅ Native request and response preservation, including function calling
+- ✅ Token usage tracking and cost calculation
+- ✅ System instructions
+- ✅ Safety settings and provider-specific fields
+- ✅ Model selection from URL path
+
+**Supported Providers:**
+
+- Google Vertex AI (with automatic path rewriting)
+
+**Example:**
+
+```bash
+curl -s -H "Content-Type: application/json" \
+  -d '{
+    "contents": [
+      {
+        "role": "user",
+        "parts": [{"text": "Tell me a story."}]
+      }
+    ]
+  }' \
+  $GATEWAY_URL/v1beta/models/gemini-3-flash-preview:streamGenerateContent
+```
+
 ### Models
 
 **Endpoint:** `GET /v1/models`
@@ -471,6 +544,7 @@ The following table summarizes which providers support which endpoints:
 | [AWS Bedrock](https://docs.aws.amazon.com/bedrock/latest/APIReference/)                               |        ✅        |     🚧      |     ✅     |        ❌        |         ❌         |   ❌   |    ❌    | Via API translation (embeddings: Titan models only)                                                                  |
 | [Azure OpenAI](https://learn.microsoft.com/en-us/azure/ai-services/openai/reference)                  |        ✅        |     🚧      |     ✅     |        ❌        |         ⚠️         |   ❌   |    ❌    | Via API translation or via [OpenAI-compatible API](https://learn.microsoft.com/en-us/azure/ai-foundry/openai/latest) |
 | [Google Gemini](https://ai.google.dev/gemini-api/docs/openai)                                         |        ✅        |     ⚠️      |     ✅     |        ⚠️        |         ❌         |   ❌   |    ❌    | Via OpenAI-compatible API                                                                                            |
+| [Google AI Studio (native)](https://ai.google.dev/api/rest)                                           |        ❌        |     ❌      |     ❌     |        ⚠️        |         ❌         |   ❌   |    ❌    | Native `generateContent` via `GoogleAIStudio` schema; image generation only                                          |
 | [Groq](https://console.groq.com/docs/openai)                                                          |        ✅        |     ❌      |     ❌     |        ❌        |         ❌         |   ❌   |    ❌    | Via OpenAI-compatible API                                                                                            |
 | [Grok](https://docs.x.ai/docs/api-reference)                                                          |        ✅        |     ⚠️      |     ❌     |        ⚠️        |         ❌         |   ❌   |    ❌    | Via OpenAI-compatible API                                                                                            |
 | [Together AI](https://docs.together.ai/docs/openai-api-compatibility)                                 |        ⚠️        |     ⚠️      |     ⚠️     |        ⚠️        |         ❌         |   ❌   |    ❌    | Via OpenAI-compatible API                                                                                            |

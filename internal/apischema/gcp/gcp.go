@@ -6,10 +6,18 @@
 package gcp
 
 import (
+	"encoding/json"
+
 	"google.golang.org/genai"
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
 )
+
+// NativeGenerateContentRequest preserves the client request byte-for-byte. In
+// particular, thoughtSignature is opaque and is not always standard base64.
+type NativeGenerateContentRequest struct {
+	Raw json.RawMessage
+}
 
 type GenerateContentRequest struct {
 	// Contains the multipart content of a message.
@@ -40,6 +48,13 @@ type GenerateContentRequest struct {
 	// https://github.com/googleapis/go-genai/blob/6a8184fcaf8bf15f0c566616a7b356560309be9b/types.go#L1057
 	SafetySettings []*genai.SafetySetting `json:"safetySettings,omitempty"`
 }
+
+// GenerateContentResponse is a minimal representation of the Gemini generateContent response,
+// used only to extract usageMetadata for token accounting. The full response body is passed
+// through to the client unchanged.
+//
+// https://docs.cloud.google.com/vertex-ai/generative-ai/docs/reference/rest/v1/GenerateContentResponse
+type GenerateContentResponse = genai.GenerateContentResponse
 
 // https://docs.cloud.google.com/vertex-ai/generative-ai/docs/model-reference/text-embeddings-api#syntax
 type Instance struct {

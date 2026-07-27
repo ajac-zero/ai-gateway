@@ -521,6 +521,17 @@ func Test_filterSensitiveHeadersForLogging(t *testing.T) {
 	require.Contains(t, hm.Headers, &corev3.HeaderValue{Key: "authorization", Value: "sensitive"})
 }
 
+func Test_isSensitiveHeader(t *testing.T) {
+	// The default keys plus any x-aigw-* header must be treated as sensitive so that
+	// upstream auth headers and per-request credential overrides are redacted in debug logs.
+	for _, key := range []string{"authorization", "Authorization", "x-api-key", "x-goog-api-key", "X-Goog-Api-Key", "x-aigw-goog-api-key"} {
+		require.True(t, isSensitiveHeader(key, sensitiveHeaderKeys), "expected %q to be sensitive", key)
+	}
+	for _, key := range []string{"content-type", "x-ai-eg-model", ":path"} {
+		require.False(t, isSensitiveHeader(key, sensitiveHeaderKeys), "expected %q to not be sensitive", key)
+	}
+}
+
 func Test_filterRequestBodyResponseHeaders(t *testing.T) {
 	buf := internaltesting.CaptureOutput("test")[0]
 	logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{
@@ -845,6 +856,51 @@ func Test_headersToMap(t *testing.T) {
 	}
 	m := headersToMap(hm)
 	require.Equal(t, map[string]string{"foo": "bar", "dog": "cat"}, m)
+}
+
+func TestServer_ProcessorForPath_PrefixMatch(t *testing.T) {
+	s, err := NewServer(slog.Default(), false)
+	require.NoError(t, err)
+	s.config = &filterapi.RuntimeConfig{}
+
+	exactProc := &mockProcessor{}
+	longerPrefixProc := &mockProcessor{}  // /v1beta/models/ (longer)
+	shorterPrefixProc := &mockProcessor{} // /v1beta/ (shorter)
+
+	s.Register("/v1beta/models/exact-model:generateContent", func(*filterapi.RuntimeConfig, map[string]string, *slog.Logger, bool, bool) (Processor, error) {
+		return exactProc, nil
+	})
+	s.RegisterPrefix("/v1beta/models/", func(*filterapi.RuntimeConfig, map[string]string, *slog.Logger, bool, bool) (Processor, error) {
+		return longerPrefixProc, nil
+	})
+	s.RegisterPrefix("/v1beta/", func(*filterapi.RuntimeConfig, map[string]string, *slog.Logger, bool, bool) (Processor, error) {
+		return shorterPrefixProc, nil
+	})
+
+	t.Run("exact match wins over prefix", func(t *testing.T) {
+		proc, err := s.processorForPath(map[string]string{":path": "/v1beta/models/exact-model:generateContent"}, false, slog.Default())
+		require.NoError(t, err)
+		require.Equal(t, exactProc, proc)
+	})
+
+	t.Run("longest prefix wins", func(t *testing.T) {
+		proc, err := s.processorForPath(map[string]string{":path": "/v1beta/models/gemini-flash:generateContent"}, false, slog.Default())
+		require.NoError(t, err)
+		require.Equal(t, longerPrefixProc, proc)
+	})
+
+	t.Run("shorter prefix matches when longer does not", func(t *testing.T) {
+		proc, err := s.processorForPath(map[string]string{":path": "/v1beta/other-path"}, false, slog.Default())
+		require.NoError(t, err)
+		require.Equal(t, shorterPrefixProc, proc)
+	})
+
+	t.Run("unknown path returns errNoProcessor", func(t *testing.T) {
+		proc, err := s.processorForPath(map[string]string{":path": "/unknown/path"}, false, slog.Default())
+		require.Error(t, err)
+		require.ErrorIs(t, err, errNoProcessor)
+		require.Nil(t, proc)
+	})
 }
 
 func TestServer_ProcessorForPath_QueryParameterStripping(t *testing.T) {

@@ -35,10 +35,13 @@ func TestParseEndpointPrefixes_UnknownKey(t *testing.T) {
 	require.Contains(t, err.Error(), "unknown endpointPrefixes key")
 }
 
-func TestParseEndpointPrefixes_EmptyValue(t *testing.T) {
-	ep, err := ParseEndpointPrefixes("openai:")
+func TestParseEndpointPrefixes_EmptyValueRemovesPrefix(t *testing.T) {
+	ep, err := ParseEndpointPrefixes("openai:,cohere:/cohere,anthropic:/anthropic,gemini:/v1beta")
 	require.NoError(t, err)
 	require.Empty(t, ep.OpenAI)
+	require.Equal(t, "/cohere", ep.Cohere)
+	require.Equal(t, "/anthropic", ep.Anthropic)
+	require.Equal(t, "/v1beta", ep.Gemini)
 }
 
 func TestParseEndpointPrefixes_MissingColon(t *testing.T) {
