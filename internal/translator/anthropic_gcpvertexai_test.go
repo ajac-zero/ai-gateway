@@ -303,7 +303,7 @@ func TestAnthropicToGCPVertexAI_RequestBodyRejectsErrorToolResult(t *testing.T) 
 	require.ErrorContains(t, err, "tool_result is_error is not supported")
 }
 
-func TestAnthropicToGCPVertexAI_RequestBodyRejectsCacheControl(t *testing.T) {
+func TestAnthropicToGCPVertexAI_RequestBodyIgnoresCacheControl(t *testing.T) {
 	cacheControl := &anthropicschema.CacheControl{Ephemeral: &anthropicschema.CacheControlEphemeral{Type: "ephemeral"}}
 	tests := []struct {
 		name      string
@@ -347,8 +347,9 @@ func TestAnthropicToGCPVertexAI_RequestBodyRejectsCacheControl(t *testing.T) {
 			}
 			tt.configure(req)
 			tr := NewAnthropicToGCPVertexAITranslator("")
-			_, _, err := tr.RequestBody(nil, req, false)
-			require.ErrorContains(t, err, "cache_control is not supported")
+			_, body, err := tr.RequestBody(nil, req, false)
+			require.NoError(t, err)
+			require.NotContains(t, string(body), "cache_control")
 		})
 	}
 }
