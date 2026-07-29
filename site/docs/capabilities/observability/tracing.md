@@ -128,6 +128,9 @@ extProc:
       value: "true" # Hide embeddings input
     - name: OPENINFERENCE_HIDE_EMBEDDINGS_VECTORS
       value: "true" # Hide embeddings output
+    # Bound span size when clients pass many tool/function schemas
+    - name: OPENINFERENCE_HIDE_TOOLS
+      value: "true" # Omit llm.tools.N.tool.json_schema attributes
 ```
 
 Note: Hiding inputs/outputs prevents human or LLM-as-a-Judge evaluation of your

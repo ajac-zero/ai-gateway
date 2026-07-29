@@ -193,11 +193,13 @@ func buildRequestAttributes(chatRequest *openai.ChatCompletionRequest, body stri
 	}
 
 	// Add indexed attributes for each tool.
-	for i, tool := range chatRequest.Tools {
-		if toolJSON, err := json.Marshal(tool); err == nil {
-			attrs = append(attrs,
-				attribute.String(openinference.InputToolsAttribute(i), string(toolJSON)),
-			)
+	if !config.HideTools {
+		for i, tool := range chatRequest.Tools {
+			if toolJSON, err := json.Marshal(tool); err == nil {
+				attrs = append(attrs,
+					attribute.String(openinference.InputToolsAttribute(i), string(toolJSON)),
+				)
+			}
 		}
 	}
 
@@ -420,11 +422,13 @@ func buildResponsesRequestAttributes(req *openai.ResponseRequest, body []byte, c
 	}
 
 	// Add indexed attributes for each tool.
-	for i, tool := range req.Tools {
-		if toolJSON, err := json.Marshal(tool); err == nil {
-			attrs = append(attrs,
-				attribute.String(openinference.InputToolsAttribute(i), string(toolJSON)),
-			)
+	if !config.HideTools {
+		for i, tool := range req.Tools {
+			if toolJSON, err := json.Marshal(tool); err == nil {
+				attrs = append(attrs,
+					attribute.String(openinference.InputToolsAttribute(i), string(toolJSON)),
+				)
+			}
 		}
 	}
 	return attrs
