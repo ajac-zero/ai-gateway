@@ -422,3 +422,43 @@ func TestMessageRecorder_RecordResponse(t *testing.T) {
 		})
 	}
 }
+
+// TestBuildRequestAttributes_HideTools verifies that HideTools omits
+// llm.tools.N.tool.json_schema attributes while keeping the rest.
+func TestBuildRequestAttributes_HideTools(t *testing.T) {
+	reqWithTools := &anthropic.MessagesRequest{
+		MaxTokens: 100,
+		Model:     "claude-3-opus-20240229",
+		Messages: []anthropic.MessageParam{
+			{
+				Role:    anthropic.MessageRoleUser,
+				Content: anthropic.MessageContent{Text: "What time is it?"},
+			},
+		},
+		Tools: []anthropic.ToolUnion{
+			{Tool: &anthropic.Tool{Name: "get_time", InputSchema: anthropic.ToolInputSchema{Type: "object"}}},
+		},
+	}
+	body, err := json.Marshal(reqWithTools)
+	require.NoError(t, err)
+
+	t.Run("default emits llm.tools.*", func(t *testing.T) {
+		attrs := buildRequestAttributes(reqWithTools, string(body), openinference.NewTraceConfig())
+		hasTool := false
+		for _, a := range attrs {
+			if a.Key == "llm.tools.0.tool.json_schema" {
+				hasTool = true
+				break
+			}
+		}
+		require.True(t, hasTool, "expected llm.tools.0.tool.json_schema when HideTools is false")
+	})
+
+	t.Run("HideTools=true omits llm.tools.*", func(t *testing.T) {
+		cfg := &openinference.TraceConfig{HideTools: true}
+		attrs := buildRequestAttributes(reqWithTools, string(body), cfg)
+		for _, a := range attrs {
+			require.NotContains(t, string(a.Key), "llm.tools.", "no llm.tools.* attributes should be emitted when HideTools is true")
+		}
+	})
+}

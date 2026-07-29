@@ -44,6 +44,11 @@ const (
 	// Hides LLM choices (completions API outputs).
 	// See: https://github.com/Arize-ai/openinference/blob/main/spec/configuration.md
 	EnvHideChoices = "OPENINFERENCE_HIDE_CHOICES"
+	// EnvHideTools is the environment variable for TraceConfig.HideTools.
+	// Hides tool/function schemas passed to the LLM (llm.tools.N.tool.json_schema).
+	// Not part of the upstream OpenInference spec; introduced by this fork to
+	// bound span size when clients send many tools with large descriptions.
+	EnvHideTools = "OPENINFERENCE_HIDE_TOOLS"
 )
 
 // Default values for trace configuration.
@@ -61,6 +66,7 @@ const (
 	defaultHideEmbeddingsVectors       = false
 	defaultHideEmbeddingsText          = false
 	defaultBase64ImageMaxLength        = 32000
+	defaultHideTools                   = false
 )
 
 // RedactedValue is the value used when content is hidden for privacy.
@@ -121,6 +127,14 @@ type TraceConfig struct {
 	// Only applies to completions API outputs (not chat completions).
 	// When true, llm.choices.N.completion.text attributes contain "__REDACTED__".
 	HideChoices bool
+	// HideTools controls whether the JSON schema of tools/functions passed to
+	// the LLM is hidden. Maps to OPENINFERENCE_HIDE_TOOLS.
+	// When true, llm.tools.N.tool.json_schema attributes are omitted entirely
+	// (not redacted with __REDACTED__: emitting a redacted marker for every
+	// tool would still bloat spans on clients that send many tools).
+	// This flag is fork-specific and not part of the upstream OpenInference
+	// spec.
+	HideTools bool
 }
 
 // NewTraceConfig creates a new TraceConfig with default values.
@@ -141,6 +155,7 @@ func NewTraceConfig() *TraceConfig {
 		Base64ImageMaxLength:        defaultBase64ImageMaxLength,
 		HidePrompts:                 defaultHidePrompts,
 		HideChoices:                 defaultHideChoices,
+		HideTools:                   defaultHideTools,
 	}
 }
 
@@ -169,6 +184,7 @@ func NewTraceConfigFromEnv() *TraceConfig {
 		Base64ImageMaxLength:        getIntEnv(EnvBase64ImageMaxLength, defaultBase64ImageMaxLength),
 		HidePrompts:                 getBoolEnv(EnvHidePrompts, defaultHidePrompts),
 		HideChoices:                 getBoolEnv(EnvHideChoices, defaultHideChoices),
+		HideTools:                   getBoolEnv(EnvHideTools, defaultHideTools),
 	}
 }
 

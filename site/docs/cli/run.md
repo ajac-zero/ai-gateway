@@ -293,6 +293,7 @@ focused on retrieval and semantic analysis.
   - `OPENINFERENCE_HIDE_OUTPUTS`: Hide output messages/completions (default: `false`)
   - `OPENINFERENCE_HIDE_EMBEDDINGS_TEXT`: Hide embeddings input (default: `false`)
   - `OPENINFERENCE_HIDE_EMBEDDINGS_VECTORS`: Hide embeddings output (default: `false`)
+  - `OPENINFERENCE_HIDE_TOOLS`: Omit `llm.tools.N.tool.json_schema` attributes (default: `false`). Useful when clients pass many or large tool schemas.
 
 - **Header Mapping**: Map HTTP request headers to span attributes, metric labels, and access log attributes. See [Session Tracking][session-tracking] for more details.
   - `OTEL_AIGW_REQUEST_HEADER_ATTRIBUTES`: Base mapping applied to metrics, spans, and access logs. Example: `x-tenant-id:tenant.id`
