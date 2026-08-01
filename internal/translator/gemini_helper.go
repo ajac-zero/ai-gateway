@@ -54,11 +54,50 @@ const (
 // -------------------------------------------------------------.
 
 // openAIMessagesToGeminiContents converts OpenAI messages to Gemini Contents and SystemInstruction.
+//
+// Both plain user text and functionResponse parts go on role="user" contents,
+// but Vertex Gemini rejects a single content that mixes the two. It returns
+// "Requests ending with a model turn are not supported." even though the
+// request literally ends in role="user". Emitting the functionResponse group
+// and any following user text as two consecutive role="user" contents is
+// accepted (verified against gemini-3.6-flash on Vertex REST).
+//
+// To honor that boundary without inventing content or reordering messages, we
+// buffer consecutive OpenAI user- or tool-role parts into a single pending
+// group and flush it whenever the kind changes or the assistant turn arrives.
 func openAIMessagesToGeminiContents(messages []openai.ChatCompletionMessageParamUnion, requestModel internalapi.RequestModel) ([]genai.Content, *genai.Content, error) {
 	var gcpContents []genai.Content
 	var systemInstruction *genai.Content
 	knownToolCalls := make(map[string]string)
-	var gcpParts []*genai.Part
+
+	// pendingParts buffers parts that will end up on a single Gemini
+	// role="user" content. pendingKind records whether those parts came from
+	// OpenAI "user" or "tool" messages; a transition between the two triggers
+	// a flush so the resulting Gemini contents preserve the boundary.
+	const (
+		kindNone = 0
+		kindUser = 1
+		kindTool = 2
+	)
+	var pendingParts []*genai.Part
+	pendingKind := kindNone
+
+	flushPending := func() {
+		if len(pendingParts) == 0 {
+			return
+		}
+		gcpContents = append(gcpContents, genai.Content{Role: genai.RoleUser, Parts: pendingParts})
+		pendingParts = nil
+		pendingKind = kindNone
+	}
+
+	appendParts := func(kind int, parts ...*genai.Part) {
+		if pendingKind != kindNone && pendingKind != kind {
+			flushPending()
+		}
+		pendingKind = kind
+		pendingParts = append(pendingParts, parts...)
+	}
 
 	for _, msgUnion := range messages {
 		switch {
@@ -93,20 +132,16 @@ func openAIMessagesToGeminiContents(messages []openai.ChatCompletionMessageParam
 			if err != nil {
 				return nil, nil, fmt.Errorf("invalid user message: %w", err)
 			}
-			gcpParts = append(gcpParts, parts...)
+			appendParts(kindUser, parts...)
 		case msgUnion.OfTool != nil:
 			msg := msgUnion.OfTool
 			part, err := toolMsgToGeminiParts(*msg, knownToolCalls)
 			if err != nil {
 				return nil, nil, fmt.Errorf("invalid tool message: %w", err)
 			}
-			gcpParts = append(gcpParts, part)
+			appendParts(kindTool, part)
 		case msgUnion.OfAssistant != nil:
-			// Flush any accumulated user/tool parts before assistant.
-			if len(gcpParts) > 0 {
-				gcpContents = append(gcpContents, genai.Content{Role: genai.RoleUser, Parts: gcpParts})
-				gcpParts = nil
-			}
+			flushPending()
 			msg := msgUnion.OfAssistant
 			assistantParts, toolCalls, err := assistantMsgToGeminiParts(msg)
 			if err != nil {
@@ -119,10 +154,7 @@ func openAIMessagesToGeminiContents(messages []openai.ChatCompletionMessageParam
 		}
 	}
 
-	// If there are any remaining parts after processing all messages, add them as user content.
-	if len(gcpParts) > 0 {
-		gcpContents = append(gcpContents, genai.Content{Role: genai.RoleUser, Parts: gcpParts})
-	}
+	flushPending()
 	return gcpContents, systemInstruction, nil
 }
 
