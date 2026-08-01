@@ -19,7 +19,7 @@ import (
 type VersionedAPISchema struct {
 	// Name is the name of the API schema of the AIGatewayRoute or AIServiceBackend.
 	//
-	// +kubebuilder:validation:Enum=OpenAI;Cohere;AWSBedrock;AzureOpenAI;GCPVertexAI;GCPAnthropic;Anthropic;AWSAnthropic;AWSOpenAI;TypeSafe
+	// +kubebuilder:validation:Enum=OpenAI;Cohere;AWSBedrock;AzureOpenAI;GCPVertexAI;GCPAnthropic;Anthropic;AWSAnthropic;AWSOpenAI;TypeSafe;GoogleAIStudio
 	Name APISchema `json:"name"`
 
 	// Version is the version of the API schema.
@@ -100,6 +100,13 @@ const (
 	//
 	// https://docs.typesafe.ai/api.md
 	APISchemaTypeSafe APISchema = "TypeSafe"
+	// APISchemaGoogleAIStudio is the schema for the Google AI Studio (Gemini Developer API) hosted at
+	// generativelanguage.googleapis.com. It uses the `x-goog-api-key` header for auth (see the GoogleAIKey
+	// BackendSecurityPolicy) and is distinct from APISchemaGCPVertexAI, which uses GCP service account
+	// credentials against the Vertex AI platform.
+	//
+	// https://ai.google.dev/api/rest
+	APISchemaGoogleAIStudio APISchema = "GoogleAIStudio"
 )
 
 const (

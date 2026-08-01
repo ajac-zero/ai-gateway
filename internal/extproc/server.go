@@ -35,9 +35,9 @@ var (
 	sensitiveHeaderRedactedValue = []byte("[REDACTED]")
 	// sensitiveHeaderKeys are the (lowercased) header names whose values are redacted in debug logs.
 	// They cover every credential header set by the backendauth handlers: "authorization" (API key,
-	// Azure, GCP, AWS SigV4), "x-api-key" (Anthropic), "api-key" (Azure API key) and
-	// "x-amz-security-token" (AWS SigV4 session token).
-	sensitiveHeaderKeys = []string{"authorization", "x-api-key", "api-key", "x-amz-security-token"}
+	// Azure, GCP, AWS SigV4), "x-api-key" (Anthropic), "x-goog-api-key" (Google AI Studio),
+	// "api-key" (Azure API key) and "x-amz-security-token" (AWS SigV4 session token).
+	sensitiveHeaderKeys = []string{"authorization", "x-api-key", "x-goog-api-key", "api-key", "x-amz-security-token"}
 )
 
 // contextKey is a type for context keys to avoid collisions.
@@ -119,7 +119,8 @@ var errNoProcessor = errors.New("no processor registered for the given path")
 
 // processorForPath returns the processor for the given path.
 // Exact path matching is tried first; if no exact match exists, the longest registered
-// prefix (see RegisterPrefix) that matches the path on a segment boundary is used.
+// prefix (see RegisterPrefix) that matches the path on a segment boundary is used. A prefix with a
+// trailing slash (e.g. "/v1beta/models/") only matches paths nested under it.
 func (s *Server) processorForPath(requestHeaders map[string]string, isUpstreamFilter bool, logger *slog.Logger) (Processor, error) {
 	pathHeader := ":path"
 	if isUpstreamFilter {
@@ -141,7 +142,7 @@ func (s *Server) processorForPath(requestHeaders map[string]string, isUpstreamFi
 	bestLen := -1
 	for i := range s.prefixProcessorFactories {
 		pf := &s.prefixProcessorFactories[i]
-		if (path == pf.prefix || strings.HasPrefix(path, pf.prefix+"/")) && len(pf.prefix) > bestLen {
+		if (path == pf.prefix || strings.HasPrefix(path, strings.TrimSuffix(pf.prefix, "/")+"/")) && len(pf.prefix) > bestLen {
 			best = pf.factory
 			bestLen = len(pf.prefix)
 		}
