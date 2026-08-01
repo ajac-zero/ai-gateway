@@ -109,7 +109,8 @@ func (c *BackendSecurityPolicyController) reconcile(ctx context.Context, bsp *ai
 	// Determine if credential rotation is needed
 	requiresRotation := bsp.Spec.Type != aigv1b1.BackendSecurityPolicyTypeAPIKey &&
 		bsp.Spec.Type != aigv1b1.BackendSecurityPolicyTypeAzureAPIKey &&
-		bsp.Spec.Type != aigv1b1.BackendSecurityPolicyTypeAnthropicAPIKey
+		bsp.Spec.Type != aigv1b1.BackendSecurityPolicyTypeAnthropicAPIKey &&
+		bsp.Spec.Type != aigv1b1.BackendSecurityPolicyTypeGoogleAIKey
 
 	// Skip rotation for AWS when neither credentials file nor OIDC exchange is configured
 	// This allows IRSA/Pod Identity to work via the default credential chain
@@ -509,7 +510,8 @@ func getBSPGeneratedSecretName(bsp *aigv1b1.BackendSecurityPolicy) string {
 		}
 	case aigv1b1.BackendSecurityPolicyTypeAPIKey,
 		aigv1b1.BackendSecurityPolicyTypeAzureAPIKey,
-		aigv1b1.BackendSecurityPolicyTypeAnthropicAPIKey:
+		aigv1b1.BackendSecurityPolicyTypeAnthropicAPIKey,
+		aigv1b1.BackendSecurityPolicyTypeGoogleAIKey:
 		return "" // APIKey does not require rotation.
 	case aigv1b1.BackendSecurityPolicyTypeOpenAICredentials:
 		// The exchanged access token is always stored in a generated secret.
