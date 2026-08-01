@@ -35,6 +35,7 @@ const (
 	GenAIOperationTranslation          GenAIOperation = "translation"
 	GenAIOperationRerank               GenAIOperation = "rerank"
 	GenAIOperationTokenize             GenAIOperation = "tokenize"
+	GenAIOperationGenerateContent      GenAIOperation = "generate_content"
 	GenAIOperationResponsesInputTokens GenAIOperation = "responses_input_tokens"
 
 	// Provider names according to the Semantic Conventions for Generative AI Metrics.

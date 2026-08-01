@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -24,6 +25,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/types/known/structpb"
 
+	"github.com/envoyproxy/ai-gateway/internal/apischema/gcp"
 	"github.com/envoyproxy/ai-gateway/internal/backendauth"
 	"github.com/envoyproxy/ai-gateway/internal/bodymutator"
 	"github.com/envoyproxy/ai-gateway/internal/endpointspec"
@@ -59,12 +61,12 @@ var LogRequestHeaderAttributes map[string]string
 func NewFactory[ReqT any, RespT any, RespChunkT any, EndpointSpecT endpointspec.Spec[ReqT, RespT, RespChunkT]](
 	f metrics.Factory,
 	tracer tracingapi.RequestTracer[ReqT, RespT, RespChunkT],
-	_ EndpointSpecT, // This is a type marker to bind EndpointSpecT without specifying ReqT, RespT, RespChunkT explicitly.
+	eh EndpointSpecT,
 ) ProcessorFactory {
 	return func(config *filterapi.RuntimeConfig, requestHeaders map[string]string, logger *slog.Logger, isUpstreamFilter bool, enableRedaction bool) (Processor, error) {
 		logger = logger.With("isUpstreamFilter", fmt.Sprintf("%v", isUpstreamFilter))
 		if !isUpstreamFilter {
-			return newRouterProcessor[ReqT, RespT, RespChunkT, EndpointSpecT](config, requestHeaders, logger, tracer, enableRedaction), nil
+			return newRouterProcessor[ReqT, RespT, RespChunkT, EndpointSpecT](config, requestHeaders, logger, tracer, enableRedaction, eh), nil
 		}
 		return newUpstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT](requestHeaders, f.NewMetrics(), logger), nil
 	}
@@ -137,9 +139,11 @@ func newRouterProcessor[ReqT, RespT, RespChunkT any, EndpointSpecT endpointspec.
 	logger *slog.Logger,
 	tracer tracingapi.RequestTracer[ReqT, RespT, RespChunkT],
 	enableRedaction bool,
+	eh EndpointSpecT,
 ) *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT] {
 	debugLogEnabled := logger.Enabled(context.Background(), slog.LevelDebug)
 	return &routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]{
+		eh:                eh,
 		config:            config,
 		requestHeaders:    requestHeaders,
 		logger:            logger,
@@ -147,6 +151,57 @@ func newRouterProcessor[ReqT, RespT, RespChunkT any, EndpointSpecT endpointspec.
 		forceBodyMutation: false,
 		debugLogEnabled:   debugLogEnabled,
 		enableRedaction:   enableRedaction,
+	}
+}
+
+// NewGeminiProcessorFactory returns a factory for Gemini's native generate-content endpoints.
+func NewGeminiProcessorFactory(f metrics.Factory) ProcessorFactory {
+	tracer := tracingapi.NoopTracer[gcp.NativeGenerateContentRequest, gcp.GenerateContentResponse, gcp.GenerateContentResponse]{}
+	return func(config *filterapi.RuntimeConfig, requestHeaders map[string]string, logger *slog.Logger, isUpstreamFilter bool, enableRedaction bool) (Processor, error) {
+		requestPath := requestHeaders[":path"]
+		if isUpstreamFilter {
+			requestPath = requestHeaders[internalapi.OriginalPathHeader]
+		}
+		if queryIndex := strings.IndexByte(requestPath, '?'); queryIndex >= 0 {
+			requestPath = requestPath[:queryIndex]
+		}
+		model, streaming, err := extractGeminiModelFromPath(requestPath)
+		if err != nil {
+			return nil, err
+		}
+		spec := endpointspec.GenerateContentEndpointSpec{ModelFromPath: model, Streaming: streaming}
+		logger = logger.With("isUpstreamFilter", fmt.Sprintf("%v", isUpstreamFilter))
+		if !isUpstreamFilter {
+			return newRouterProcessor[gcp.NativeGenerateContentRequest, gcp.GenerateContentResponse, gcp.GenerateContentResponse](
+				config, requestHeaders, logger, tracer, enableRedaction, spec), nil
+		}
+		return newUpstreamProcessor[gcp.NativeGenerateContentRequest, gcp.GenerateContentResponse, gcp.GenerateContentResponse, endpointspec.GenerateContentEndpointSpec](
+			requestHeaders, f.NewMetrics(), logger), nil
+	}
+}
+
+func extractGeminiModelFromPath(requestPath string) (model string, streaming bool, err error) {
+	const modelsSegment = "/models/"
+	index := strings.LastIndex(requestPath, modelsSegment)
+	if index < 0 {
+		return "", false, fmt.Errorf("invalid Gemini generate-content path: %s", requestPath)
+	}
+	modelAndMethod := requestPath[index+len(modelsSegment):]
+	model, method, ok := strings.Cut(modelAndMethod, ":")
+	if !ok || model == "" || strings.ContainsAny(model, "/:") {
+		return "", false, fmt.Errorf("invalid Gemini generate-content path: %s", requestPath)
+	}
+	model, err = url.PathUnescape(model)
+	if err != nil || model == "" || strings.ContainsAny(model, "/:") {
+		return "", false, fmt.Errorf("invalid Gemini model in path: %s", requestPath)
+	}
+	switch method {
+	case "generateContent":
+		return model, false, nil
+	case "streamGenerateContent":
+		return model, true, nil
+	default:
+		return "", false, fmt.Errorf("unsupported Gemini method %q", method)
 	}
 }
 
