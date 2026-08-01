@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"log/slog"
 	"os"
 	"testing"
 
@@ -17,12 +18,25 @@ import (
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/yaml"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gwapiv1a3 "sigs.k8s.io/gateway-api/apis/v1alpha3"
 )
+
+func TestTranslateCustomResourceObjectsLoadsUserSecrets(t *testing.T) {
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "credentials", Namespace: "default"}}
+	fakeClient, _, _, _, _, _, _, _, _, err := translateCustomResourceObjects(
+		t.Context(), nil, nil, nil, nil, nil, nil, []*corev1.Secret{secret}, slog.Default(),
+	)
+	require.NoError(t, err)
+	actual := &corev1.Secret{}
+	require.NoError(t, fakeClient.Get(t.Context(), client.ObjectKeyFromObject(secret), actual))
+	require.Equal(t, secret.Name, actual.Name)
+}
 
 func Test_translate(t *testing.T) {
 	for _, tc := range []struct {
