@@ -230,6 +230,10 @@ func TestBackendSecurityPolicies(t *testing.T) {
 			name:   "oidc_invalid_issuer.yaml",
 			expErr: "spec.awsCredentials.oidcExchangeToken.oidc.provider.issuer in body should match",
 		},
+		{
+			name:   "googleai_with_apikey.yaml",
+			expErr: "When type is GoogleAIKey, only googleAIKey field should be set",
+		},
 		{name: "azure_oidc.yaml"},
 		{name: "azure_valid_credentials.yaml"},
 		{name: "aws_credential_file.yaml"},
@@ -239,6 +243,7 @@ func TestBackendSecurityPolicies(t *testing.T) {
 		{name: "aws_credential_override.yaml"},
 		{name: "gcp_oidc.yaml"},
 		{name: "anthropic-apikey.yaml"},
+		{name: "googleai-apikey.yaml"},
 		{name: "targetrefs_basic.yaml"},
 		{name: "targetrefs_multiple.yaml"},
 		{name: "targetrefs_inferencepool.yaml"},
