@@ -56,6 +56,8 @@ type openAIToGCPAnthropicTranslatorV1ChatCompletion struct {
 func (o *openAIToGCPAnthropicTranslatorV1ChatCompletion) RequestBody(_ []byte, openAIReq *openai.ChatCompletionRequest, _ bool) (
 	newHeaders []internalapi.Header, newBody []byte, err error,
 ) {
+	o.streamParser = nil
+
 	params, err := buildAnthropicParams(openAIReq, "GCPAnthropic", o.modelNameOverride)
 	if err != nil {
 		return
