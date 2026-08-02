@@ -409,13 +409,6 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) geminiCandidatesToOpenAI
 			if thoughtSummary != "" {
 				delta.ReasoningContent = &openai.StreamReasoningContent{Text: thoughtSummary}
 			}
-			// the model can not respond with both tool calls and text, so it's safe to assign it directly.
-			if signature != "" {
-				if delta.ReasoningContent == nil {
-					delta.ReasoningContent = &openai.StreamReasoningContent{}
-				}
-				delta.ReasoningContent.Signature = signature
-			}
 
 			if content != "" {
 				delta.Content = &content
@@ -432,10 +425,17 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) geminiCandidatesToOpenAI
 			// Handle signature from tool calls (if not already set from thought text)
 			if toolCallSignature != "" {
 				signature = toolCallSignature
-				if delta.ReasoningContent == nil {
-					delta.ReasoningContent = &openai.StreamReasoningContent{}
+			}
+			if signature == "" {
+				for _, part := range candidate.Content.Parts {
+					if part != nil && !part.Thought && part.ThoughtSignature != nil {
+						signature = base64.StdEncoding.EncodeToString(part.ThoughtSignature)
+						break
+					}
 				}
-				delta.ReasoningContent.Signature = signature
+			}
+			if signature != "" {
+				delta.ThinkingBlocks = append(delta.ThinkingBlocks, openai.ThinkingBlock{Type: "thinking", Signature: signature})
 			}
 
 			choice.Delta = delta

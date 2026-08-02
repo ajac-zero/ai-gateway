@@ -7,6 +7,7 @@ package translator
 
 import (
 	"bytes"
+	stdjson "encoding/json"
 	"slices"
 	"strconv"
 	"strings"
@@ -1890,8 +1891,23 @@ data: {"candidates": [
 	}
 }
 
-// TestOpenAIToGCPVertexAITranslatorV1ChatCompletion_StreamingToolCallWithSignature tests that
-// streaming tool calls with thought signatures are correctly translated.
+func TestOpenAIToGCPVertexAITranslatorV1ChatCompletion_StreamingSignatureOnly(t *testing.T) {
+	translator := NewChatCompletionOpenAIToGCPVertexAITranslator("gemini-2.0-flash-001").(*openAIToGCPVertexAITranslatorV1ChatCompletion)
+	body := `data: {"candidates":[{"content":{"parts":[{"thoughtSignature":"c2lnbmF0dXJl"}]}}]}`
+
+	_, serialized, _, _, err := translator.handleStreamingResponse(bytes.NewReader([]byte(body)), false, nil)
+	require.NoError(t, err)
+
+	var data map[string]any
+	payload := bytes.TrimSuffix(bytes.TrimPrefix(serialized, sseDataPrefix), []byte("\n\n"))
+	require.NoError(t, stdjson.Unmarshal(payload, &data))
+	delta := data["choices"].([]any)[0].(map[string]any)["delta"].(map[string]any)
+	_, hasReasoningContent := delta["reasoning_content"]
+	require.False(t, hasReasoningContent)
+	blocks := delta["thinking_blocks"].([]any)
+	require.Equal(t, map[string]any{"type": "thinking", "signature": "c2lnbmF0dXJl"}, blocks[0])
+}
+
 func TestOpenAIToGCPVertexAITranslatorV1ChatCompletion_StreamingToolCallWithSignature(t *testing.T) {
 	translator := NewChatCompletionOpenAIToGCPVertexAITranslator("gemini-2.0-flash-001").(*openAIToGCPVertexAITranslatorV1ChatCompletion)
 

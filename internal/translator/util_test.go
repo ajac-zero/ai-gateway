@@ -6,6 +6,8 @@
 package translator
 
 import (
+	"bytes"
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -77,6 +79,59 @@ func TestParseDataURI(t *testing.T) {
 }
 
 // TestSystemMsgToDeveloperMsg tests the systemMsgToDeveloperMsg function.
+func TestSerializeOpenAIChatCompletionChunk_ReasoningContent(t *testing.T) {
+	tests := []struct {
+		name              string
+		reasoningContent  *openai.StreamReasoningContent
+		wantReasoningText string
+		wantSignature     string
+	}{
+		{
+			name:             "signature only",
+			reasoningContent: &openai.StreamReasoningContent{Signature: "signature"},
+			wantSignature:    "signature",
+		},
+		{
+			name:              "text only",
+			reasoningContent:  &openai.StreamReasoningContent{Text: "thinking"},
+			wantReasoningText: "thinking",
+		},
+		{
+			name:              "text and signature",
+			reasoningContent:  &openai.StreamReasoningContent{Text: "thinking", Signature: "signature"},
+			wantReasoningText: "thinking",
+			wantSignature:     "signature",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			chunk := &openai.ChatCompletionResponseChunk{Choices: []openai.ChatCompletionResponseChunkChoice{{
+				Delta: &openai.ChatCompletionResponseChunkChoiceDelta{ReasoningContent: tc.reasoningContent},
+			}}}
+			var serialized []byte
+			require.NoError(t, serializeOpenAIChatCompletionChunk(chunk, &serialized))
+
+			var data map[string]any
+			require.NoError(t, json.Unmarshal(bytes.TrimSuffix(bytes.TrimPrefix(serialized, sseDataPrefix), []byte("\n\n")), &data))
+			delta := data["choices"].([]any)[0].(map[string]any)["delta"].(map[string]any)
+			if tc.wantReasoningText == "" {
+				_, ok := delta["reasoning_content"]
+				require.False(t, ok)
+			} else {
+				require.Equal(t, tc.wantReasoningText, delta["reasoning_content"])
+			}
+			if tc.wantSignature == "" {
+				_, ok := delta["thinking_blocks"]
+				require.False(t, ok)
+			} else {
+				blocks := delta["thinking_blocks"].([]any)
+				require.Equal(t, map[string]any{"type": "thinking", "signature": tc.wantSignature}, blocks[0])
+			}
+		})
+	}
+}
+
 func TestSystemMsgToDeveloperMsg(t *testing.T) {
 	systemMsg := openai.ChatCompletionSystemMessageParam{
 		Name:    "test-system",
