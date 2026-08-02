@@ -82,6 +82,63 @@ func TestOpenAIToAnthropicTranslator_StreamUsesResponseModel(t *testing.T) {
 	require.Equal(t, "claude-executed", model)
 }
 
+func TestOpenAIToAnthropicTranslator_StreamParserReset(t *testing.T) {
+	testStreamParserReset(t, NewChatCompletionOpenAIToAnthropicTranslator("v1", ""))
+}
+
+func TestOpenAIToGCPAnthropicTranslator_StreamParserReset(t *testing.T) {
+	testStreamParserReset(t, NewChatCompletionOpenAIToGCPAnthropicTranslator("", ""))
+}
+
+func testStreamParserReset(t *testing.T, tr OpenAIChatCompletionTranslator) {
+	t.Helper()
+
+	streamResponse := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_stream\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-response\",\"content\":[],\"usage\":{\"input_tokens\":7,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"streamed\"}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+	nonStreamResponse := `{"id":"msg_non_stream","type":"message","role":"assistant","model":"claude-response","content":[{"type":"text","text":"non-streamed"}],"stop_reason":"end_turn","usage":{"input_tokens":7,"output_tokens":3}}`
+
+	request := func(stream bool) *openai.ChatCompletionRequest {
+		return &openai.ChatCompletionRequest{
+			Model:     "claude-requested",
+			Stream:    stream,
+			MaxTokens: ptr.To(int64(100)),
+			Messages: []openai.ChatCompletionMessageParamUnion{{
+				OfUser: &openai.ChatCompletionUserMessageParam{
+					Role:    openai.ChatMessageRoleUser,
+					Content: openai.StringOrUserRoleContentUnion{Value: "Hello"},
+				},
+			}},
+		}
+	}
+
+	for _, order := range [][]bool{{true, false}, {false, true}} {
+		for _, stream := range order {
+			_, _, err := tr.RequestBody(nil, request(stream), false)
+			require.NoError(t, err)
+
+			if stream {
+				_, body, _, _, err := tr.ResponseBody(nil, bytes.NewBufferString(streamResponse), true, nil)
+				require.NoError(t, err)
+				require.NotEmpty(t, body)
+				require.Contains(t, string(body), `"content":"streamed"`)
+				continue
+			}
+
+			_, body, usage, _, err := tr.ResponseBody(nil, bytes.NewBufferString(nonStreamResponse), true, nil)
+			require.NoError(t, err)
+			require.NotEmpty(t, body)
+			require.Equal(t, "non-streamed", gjson.GetBytes(body, "choices.0.message.content").String())
+			require.Equal(t, int64(7), gjson.GetBytes(body, "usage.prompt_tokens").Int())
+			require.Equal(t, int64(3), gjson.GetBytes(body, "usage.completion_tokens").Int())
+			inputTokens, ok := usage.InputTokens()
+			require.True(t, ok)
+			require.Equal(t, uint32(7), inputTokens)
+			outputTokens, ok := usage.OutputTokens()
+			require.True(t, ok)
+			require.Equal(t, uint32(3), outputTokens)
+		}
+	}
+}
+
 func TestOpenAIToAnthropicTranslator_RawError(t *testing.T) {
 	tr := NewChatCompletionOpenAIToAnthropicTranslator("v1", "")
 	_, body, err := tr.ResponseError(map[string]string{statusHeaderName: "503"}, bytes.NewBufferString("unavailable"))
