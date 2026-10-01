@@ -238,28 +238,32 @@ func TestAnthropicToGCPVertexAI_RequestBodyWithTools(t *testing.T) {
 	require.NoError(t, err)
 	require.JSONEq(t, `{
 		"contents":[{"parts":[{"text":"What's the weather in Paris?"}],"role":"user"}],
-		"tools":[{"functionDeclarations":[{"name":"get_weather","description":"Get weather","parameters":{"type":"object","properties":{"location":{"type":"string"}},"required":["location"]}}]}],
+		"tools":[{"functionDeclarations":[{"name":"get_weather","description":"Get weather","parametersJsonSchema":{"type":"object","properties":{"location":{"type":"string"}},"required":["location"]}}]}],
 		"toolConfig":{"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":["get_weather"]}},
 		"generationConfig":{"maxOutputTokens":100}
 	}`, string(body))
 }
 
 func TestAnthropicToGCPVertexAI_RequestBodyRejectsNonObjectToolSchema(t *testing.T) {
-	req := &anthropicschema.MessagesRequest{
-		Model:     "gemini-1.5-pro",
-		MaxTokens: 100,
-		Messages:  []anthropicschema.MessageParam{{Role: anthropicschema.MessageRoleUser, Content: anthropicschema.MessageContent{Text: "Hi"}}},
-		Tools: []anthropicschema.ToolUnion{{Tool: &anthropicschema.Tool{
-			Type:        "custom",
-			Name:        "get_weather",
-			InputSchema: json.RawMessage(`["not","an","object"]`),
-		}}},
-	}
+	for _, schema := range []string{`["not","an","object"]`, `null`, `"string"`, `42`, `true`, `{"type":`} {
+		t.Run(schema, func(t *testing.T) {
+			req := &anthropicschema.MessagesRequest{
+				Model:     "gemini-1.5-pro",
+				MaxTokens: 100,
+				Messages:  []anthropicschema.MessageParam{{Role: anthropicschema.MessageRoleUser, Content: anthropicschema.MessageContent{Text: "Hi"}}},
+				Tools: []anthropicschema.ToolUnion{{Tool: &anthropicschema.Tool{
+					Type:        "custom",
+					Name:        "get_weather",
+					InputSchema: json.RawMessage(schema),
+				}}},
+			}
 
-	tr := NewAnthropicToGCPVertexAITranslator("")
-	_, _, err := tr.RequestBody(nil, req, false)
-	require.ErrorIs(t, err, internalapi.ErrInvalidRequestBody)
-	require.ErrorContains(t, err, "tool get_weather parameters must be a JSON object")
+			tr := NewAnthropicToGCPVertexAITranslator("")
+			_, _, err := tr.RequestBody(nil, req, false)
+			require.ErrorIs(t, err, internalapi.ErrInvalidRequestBody)
+			require.ErrorContains(t, err, "tool get_weather parameters must be a JSON object")
+		})
+	}
 }
 
 func TestAnthropicToGCPVertexAI_RequestBodyRejectsBuiltInTools(t *testing.T) {
