@@ -149,7 +149,7 @@ When `check` reports a patch as `conflict` or `broken`, an agent updates that pa
 
 ### Scheduled fork owner
 
-A scheduled Amp thread runs in an orb on project `ajac-zero/ai-gateway`, whose base branch is `fork/main`. It runs `fork-update apply --push`. When `check` reports a conflicted or broken patch, it starts one orb thread per such patch with the "Agent fixes for one patch" procedure, pinned to the same upstream commit. After every fixer reports back, it runs `fork-update assemble --push`. It resolves any conflicts between patches in the new merge, as described in "Resolve Integration Conflicts", before moving `fork/main`.
+A scheduled Amp thread runs in an orb on project `ajac-zero/ai-gateway`, whose base branch is `fork/main`. It runs `fork-update apply --push`. When `check` reports a conflicted or broken patch, it starts one orb thread per such patch with the "Agent fixes for one patch" procedure, pinned to the same upstream commit. Each fixer runs in the agent mode given by the report's `[tier=low|medium|high]`, and a failed fixer is retried once at the next tier up. The scheduled run itself is a `low`-mode thread that only routes work. The tier thresholds are documented at `conflict_tier` and `broken_tier` in `scripts/fork-update`. After every fixer reports back, it runs `fork-update assemble --push`. It resolves any conflicts between patches in the new merge, as described in "Resolve Integration Conflicts", before moving `fork/main`.
 
 ## Synchronize With Upstream
 
