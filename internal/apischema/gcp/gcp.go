@@ -6,11 +6,10 @@
 package gcp
 
 import (
-	"encoding/json"
-
 	"google.golang.org/genai"
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
+	"github.com/envoyproxy/ai-gateway/internal/json"
 )
 
 // NativeGenerateContentRequest preserves the client request byte-for-byte. In
