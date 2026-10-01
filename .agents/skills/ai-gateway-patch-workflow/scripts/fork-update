@@ -1,0 +1,307 @@
+#!/usr/bin/env bash
+# Copyright Envoy AI Gateway Authors
+# SPDX-License-Identifier: Apache-2.0
+# The full text of the Apache license is available in the LICENSE file at
+# the root of the repo.
+
+# Keeps the fork's patches and fork/main current with upstream.
+#
+# Usage: fork-update <check|apply|assemble> [--target REV] [--candidate REV] [--no-fetch]
+#                    [--no-tests] [--push]
+#
+#   check     Read-only. Replays every stale patch onto the target in a throwaway Git
+#             worktree, then builds, vets, and tests the packages the patch touches.
+#   apply     Runs check. If every stale patch is clean, rebases the patches with jj onto
+#             the target, fast-forwards main, and assembles fork/main. Never mutates
+#             anything when a patch needs an agent.
+#   assemble  Builds a fresh fork/main merge of trunk() and every patch/* and checks it.
+#             Moves fork/main only when the merge is conflict-free and every check passes.
+#
+#   --target REV  Upstream revision to update to (default: main@upstream after fetching).
+#   --candidate REV
+#                 assemble only: check and publish an existing merge, such as one whose
+#                 integration conflicts an agent resolved, instead of creating a new merge.
+#                 Its parents must be exactly fork_parents().
+#   --no-fetch    Do not fetch origin and upstream first.
+#   --no-tests    Skip go build/vet/test (conflict detection only).
+#   --push        After a successful apply or assemble, push main, the patch/* bookmarks,
+#                 and fork/main to origin, naming each bookmark explicitly.
+#
+# Report lines go to stdout; progress goes to stderr. Exit codes:
+#   0   nothing to do, or the requested mutation succeeded
+#   10  check only: every stale patch is clean, so `apply` will succeed
+#   20  a patch conflicts with or breaks on the target, or fork/main cannot be assembled;
+#       an agent must fix it (see "Agent fixes" in the skill)
+#   1   usage or environment error
+
+set -euo pipefail
+
+usage() { sed -n '7,35p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 1; }
+
+mode="${1:-}"
+[[ "$mode" =~ ^(check|apply|assemble)$ ]] || usage
+shift
+target_rev='main@upstream'
+candidate=''
+fetch=1
+run_tests=1
+push=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --target) target_rev="$2"; shift 2 ;;
+    --candidate) candidate="$2"; shift 2 ;;
+    --no-fetch) fetch=0; shift ;;
+    --no-tests) run_tests=0; shift ;;
+    --push) push=1; shift ;;
+    *) usage ;;
+  esac
+done
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+log_dir="${FORK_UPDATE_LOG_DIR:-/tmp/fork-update-logs/$(date -u +%Y%m%dT%H%M%SZ)}"
+mkdir -p "$log_dir"
+work_root="$(mktemp -d /tmp/fork-update-wt.XXXXXX)"
+worktrees=()
+cleanup() {
+  for wt in "${worktrees[@]}"; do git worktree remove --force "$wt" >/dev/null 2>&1 || true; done
+  rm -rf "$work_root"
+}
+trap cleanup EXIT
+
+test_exclude="${FORK_UPDATE_TEST_EXCLUDE:-tests/controller|tests/crdcel|/tests/e2e|tests/data-plane}"
+git_ident=(-c user.name=fork-update -c user.email=fork-update@localhost)
+
+progress() { printf 'fork-update: %s\n' "$*" >&2; }
+report() { printf '%s\n' "$*"; }
+rev() { jj log --no-graph --color=never -r "exactly($1, 1)" -T 'commit_id'; }
+
+if [[ $fetch -eq 1 ]]; then
+  progress "fetching origin and upstream"
+  jj git fetch --remote origin --quiet
+  jj git fetch --remote upstream --quiet
+fi
+
+target="$(rev "$target_rev")"
+mapfile -t patches < <(jj bookmark list --color=never 'patch/*' -T 'if(!remote, name ++ "\n")' | sort -u)
+[[ ${#patches[@]} -gt 0 ]] || { echo "fork-update: no patch/* bookmarks" >&2; exit 1; }
+
+# go_packages lists the existing Go package directories changed between two commits.
+go_packages() {
+  local from="$1" to="$2" dir
+  git diff --name-only "$from" "$to" -- '*.go' | xargs -r -n1 dirname | sort -u | while read -r dir; do
+    if compgen -G "$dir/*.go" >/dev/null; then printf './%s\n' "$dir"; fi
+  done
+}
+
+# restore_license_headers re-adds the repository license header that `make apigen` strips from
+# regenerated Go and YAML files. license-eye cannot enumerate files outside the main checkout,
+# so this mirrors its output for the generated files.
+restore_license_headers() {
+  local f c
+  while read -r f; do
+    case "$f" in
+      *.go) c='//' ;;
+      *.yaml | *.yml) c='#' ;;
+      *) continue ;;
+    esac
+    head -n1 "$f" | grep -q 'Copyright Envoy AI Gateway Authors' && continue
+    {
+      printf '%s Copyright Envoy AI Gateway Authors\n' "$c"
+      printf '%s SPDX-License-Identifier: Apache-2.0\n' "$c"
+      printf '%s The full text of the Apache license is available in the LICENSE file at\n' "$c"
+      printf '%s the root of the repo.\n\n' "$c"
+      cat "$f"
+    } >"$f.fork-update" && mv "$f.fork-update" "$f"
+  done < <(git diff --name-only)
+}
+
+# generated_files_current regenerates CRDs, deepcopy code, and API docs in the current
+# directory and fails if any tracked file changes.
+generated_files_current() {
+  make apigen apidoc >/dev/null 2>&1
+  restore_license_headers
+  git diff --quiet || { git diff --stat; return 1; }
+}
+
+# check_patch_tree runs the patch's standalone checks in the current directory.
+check_patch_tree() {
+  local name="$1" pkgs
+  mapfile -t pkgs < <(go_packages "$target" HEAD)
+  go build ./... || return 1
+  if [[ ${#pkgs[@]} -gt 0 ]]; then
+    go vet "${pkgs[@]}" || return 1
+    go test -count=1 "${pkgs[@]}" || return 1
+  fi
+  if ! git diff --quiet "$target" HEAD -- api/; then
+    generated_files_current || { echo "generated files are out of date for $name"; return 1; }
+  fi
+}
+
+declare -A status detail replay_tree
+assemble_conflict=0
+stale=()
+
+# replay_patch cherry-picks a patch onto the target in a throwaway worktree and checks it.
+replay_patch() {
+  local name="$1" tip base wt commits c files
+  tip="$(rev "bookmarks(exact:\"$name\")")"
+  if git merge-base --is-ancestor "$target" "$tip"; then
+    status[$name]=up-to-date
+    return
+  fi
+  stale+=("$name")
+  base="$(git merge-base "$target" "$tip")"
+  if [[ -n "$(git rev-list --merges "$base..$tip")" ]]; then
+    status[$name]=conflict
+    detail[$name]="series contains merge commits"
+    return
+  fi
+  wt="$work_root/${name//\//_}"
+  git worktree add --quiet --detach "$wt" "$target"
+  worktrees+=("$wt")
+  mapfile -t commits < <(git rev-list --reverse "$base..$tip")
+  for c in "${commits[@]}"; do
+    if ! git -C "$wt" "${git_ident[@]}" cherry-pick --allow-empty --empty=keep "$c" >/dev/null 2>&1; then
+      files="$(git -C "$wt" diff --name-only --diff-filter=U | paste -sd, -)"
+      git -C "$wt" cherry-pick --abort >/dev/null 2>&1 || true
+      status[$name]=conflict
+      detail[$name]="first conflict at ${c:0:12} \"$(git log -1 --format=%s "$c")\" in ${files:-unknown files}"
+      return
+    fi
+  done
+  replay_tree[$name]="$(git -C "$wt" rev-parse 'HEAD^{tree}')"
+  if [[ $run_tests -eq 1 ]]; then
+    progress "checking $name on ${target:0:12}"
+    local log="$log_dir/${name//\//_}.log"
+    if ! (cd "$wt" && check_patch_tree "$name") >"$log" 2>&1; then
+      status[$name]=broken
+      detail[$name]="replays cleanly but fails checks; log: $log"
+      return
+    fi
+  fi
+  status[$name]=clean
+}
+
+run_check() {
+  report "target $target $(git log -1 --format=%s "$target")"
+  local name needs_agent=0
+  for name in "${patches[@]}"; do
+    replay_patch "$name"
+    report "$name ${status[$name]}${detail[$name]:+ — ${detail[$name]}}"
+    [[ ${status[$name]} == conflict || ${status[$name]} == broken ]] && needs_agent=1
+  done
+  if [[ $needs_agent -eq 1 ]]; then return 20; fi
+  if [[ ${#stale[@]} -gt 0 ]]; then return 10; fi
+  return 0
+}
+
+push_bookmarks() {
+  local args=(-b fork/main) name
+  for name in "${patches[@]}"; do args+=(-b "$name"); done
+  if git merge-base --is-ancestor "$(rev 'main@origin')" "$(rev main)"; then args+=(-b main); fi
+  progress "pushing ${args[*]}"
+  jj git push --remote origin "${args[@]}"
+}
+
+# assemble builds and checks a fresh fork/main. Returns 0 on success or no change, 20 otherwise.
+assemble() {
+  local parents current merge wt log
+  parents="$(jj log --no-graph --color=never -r 'fork_parents()' -T 'commit_id ++ "\n"' | sort)"
+  current="$(jj log --no-graph --color=never -r 'parents(fork_head())' -T 'commit_id ++ "\n"' 2>/dev/null | sort || true)"
+  local op
+  op="$(jj op log -n1 --no-graph -T 'self.id()')"
+  if [[ -n "$candidate" ]]; then
+    merge="$(rev "$candidate")"
+    if [[ "$(jj log --no-graph --color=never -r "parents($merge)" -T 'commit_id ++ "\n"' | sort)" != "$parents" ]]; then
+      report "candidate ${merge:0:12} does not merge exactly fork_parents()"
+      return 20
+    fi
+  elif [[ "$parents" == "$current" ]]; then
+    report "fork/main already merges trunk() and every patch"
+    return 0
+  else
+    jj new --quiet 'fork_parents()' -m "internal: assemble fork patch set"
+    merge="$(rev @)"
+  fi
+  if [[ -n "$(jj log --no-graph -r "$merge & conflicts()" -T 'commit_id')" ]]; then
+    report "fork/main conflict — merge ${merge:0:12} has conflicts between patches:"
+    jj resolve --list -r "$merge" | sed 's/^/  /'
+    report "resolve them in that commit, then run: fork-update assemble --candidate ${merge:0:12} --push"
+    assemble_conflict=1
+    return 20
+  fi
+  if [[ $run_tests -eq 1 ]]; then
+    wt="$work_root/fork-main"
+    git worktree add --quiet --detach "$wt" "$merge"
+    worktrees+=("$wt")
+    log="$log_dir/fork-main.log"
+    progress "checking fork/main candidate ${merge:0:12}"
+    # The package list is split into arguments on purpose.
+    # shellcheck disable=SC2046
+    if ! (cd "$wt" &&
+      go build ./... &&
+      go vet ./... &&
+      go tool -modfile=tools/go.mod golangci-lint run --build-tags=test_crdcel,test_controller,test_extproc,test_e2e ./... &&
+      generated_files_current &&
+      go test $(go list ./... | grep -v -E "$test_exclude")) >"$log" 2>&1; then
+      report "fork/main candidate ${merge:0:12} fails checks; fork/main not moved; log: $log"
+      [[ -z "$candidate" ]] && jj op restore --quiet "$op"
+      return 20
+    fi
+  fi
+  jj bookmark set fork/main -r "$merge" --allow-backwards --quiet
+  jj new --quiet fork/main
+  report "fork/main -> ${merge:0:12}"
+}
+
+# apply_updates rebases every clean stale patch with jj and verifies each result matches the
+# tree the throwaway replay produced.
+apply_updates() {
+  local name tip base op new_short new_tip
+  op="$(jj op log -n1 --no-graph -T 'self.id()')"
+  for name in "${stale[@]}"; do
+    tip="$(rev "bookmarks(exact:\"$name\")")"
+    base="$(git merge-base "$target" "$tip")"
+    new_short="$(jj duplicate --color=never "$base..$tip" -o "$target" 2>&1 |
+      awk -v src="${tip:0:12}" '$1 == "Duplicated" && $2 == src { print $5 }')"
+    new_tip="$(rev "$new_short")"
+    if [[ -n "$(jj log --no-graph -r "($target..$new_tip) & conflicts()" -T 'commit_id')" ]] ||
+      [[ "$(git rev-parse "$new_tip^{tree}")" != "${replay_tree[$name]}" ]]; then
+      report "$name: jj rebase differs from the verified replay; restoring operation ${op:0:12}"
+      jj op restore --quiet "$op"
+      return 20
+    fi
+    jj bookmark set "$name" -r "$new_tip" --allow-backwards --quiet
+    report "$name -> ${new_tip:0:12}"
+  done
+  if git merge-base --is-ancestor "$(rev main)" "$target"; then
+    jj bookmark set main -r "$target" --quiet
+    report "main -> ${target:0:12}"
+  fi
+}
+
+case "$mode" in
+  check)
+    rc=0; run_check || rc=$?
+    exit "$rc"
+    ;;
+  apply)
+    rc=0; run_check || rc=$?
+    if [[ $rc -eq 20 ]]; then report "not applying: some patches need an agent"; exit 20; fi
+    apply_op="$(jj op log -n1 --no-graph -T 'self.id()')"
+    if [[ $rc -eq 10 ]]; then apply_updates || exit $?; fi
+    rc=0; assemble || rc=$?
+    if [[ $rc -ne 0 && $assemble_conflict -eq 0 ]]; then
+      report "restoring operation ${apply_op:0:12}; no bookmarks moved"
+      jj op restore --quiet "$apply_op"
+    fi
+    if [[ $rc -eq 0 && $push -eq 1 ]]; then push_bookmarks; fi
+    exit "$rc"
+    ;;
+  assemble)
+    rc=0; assemble || rc=$?
+    if [[ $rc -eq 0 && $push -eq 1 ]]; then push_bookmarks; fi
+    exit "$rc"
+    ;;
+esac
