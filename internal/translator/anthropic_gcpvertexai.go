@@ -67,7 +67,6 @@ func (a *anthropicToGCPVertexAITranslator) RequestBody(_ []byte, body *anthropic
 	}
 
 	openAIReq := buildOpenAIChatCompletionRequest(body, a.modelNameOverride)
-	openAIReq.Tools = normalizeAnthropicToolParametersForGemini(openAIReq.Tools)
 	gcpReq, err := a.geminiTranslator.openAIMessageToGeminiMessage(openAIReq, a.requestModel)
 	if err != nil {
 		return nil, nil, err
@@ -173,6 +172,13 @@ func validateAnthropicToGCPVertexAIRequest(body *anthropic.MessagesRequest) erro
 		if body.Tools[i].Tool == nil {
 			return fmt.Errorf("%w: tool %d uses an Anthropic built-in tool unsupported by GCP Vertex AI translation", internalapi.ErrInvalidRequestBody, i)
 		}
+		tool := body.Tools[i].Tool
+		if len(tool.InputSchema) > 0 {
+			var params map[string]json.RawMessage
+			if err := json.Unmarshal(tool.InputSchema, &params); err != nil || params == nil {
+				return fmt.Errorf("%w: tool %s parameters must be a JSON object", internalapi.ErrInvalidRequestBody, tool.Name)
+			}
+		}
 	}
 	for i, msg := range body.Messages {
 		for j, block := range msg.Content.Array {
@@ -262,26 +268,6 @@ func anthropicThinkingToGemini(thinking *anthropic.Thinking) *genai.ThinkingConf
 		return &genai.ThinkingConfig{IncludeThoughts: false}
 	}
 	return nil
-}
-
-// normalizeAnthropicToolParametersForGemini decodes Anthropic tool input schemas, which are
-// carried as raw JSON, into the map form the Gemini function declaration builder requires.
-// Schemas that are not JSON objects are left as-is so the builder rejects them as invalid.
-func normalizeAnthropicToolParametersForGemini(tools []openai.Tool) []openai.Tool {
-	for i := range tools {
-		if tools[i].Function == nil {
-			continue
-		}
-		schema, ok := tools[i].Function.Parameters.(json.RawMessage)
-		if !ok || len(schema) == 0 {
-			continue
-		}
-		var params map[string]any
-		if err := json.Unmarshal(schema, &params); err == nil && params != nil {
-			tools[i].Function.Parameters = params
-		}
-	}
-	return tools
 }
 
 // ResponseHeaders implements [AnthropicMessagesTranslator.ResponseHeaders].
@@ -427,11 +413,12 @@ func (a *anthropicToGCPVertexAITranslator) responseBodyStreaming(body io.Reader,
 	}
 	if span != nil {
 		for line := range bytes.SplitSeq(out, []byte("\n")) {
-			if !bytes.HasPrefix(line, sseDataPrefix) {
+			data, ok := cutSSEDataPrefix(line)
+			if !ok {
 				continue
 			}
 			chunk := &anthropic.MessagesStreamChunk{}
-			if unmarshalErr := json.Unmarshal(bytes.TrimPrefix(line, sseDataPrefix), chunk); unmarshalErr == nil {
+			if unmarshalErr := json.Unmarshal(data, chunk); unmarshalErr == nil {
 				span.RecordResponseChunk(chunk)
 			}
 		}
