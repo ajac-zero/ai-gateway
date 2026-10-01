@@ -1,0 +1,21 @@
+# Copyright Envoy AI Gateway Authors
+# SPDX-License-Identifier: Apache-2.0
+# The full text of the Apache license is available in the LICENSE file at
+# the root of the repo.
+
+#:schema https://docs.jj-vcs.dev/latest/config-schema.json
+
+[revset-aliases]
+"trunk()" = 'exactly(main@upstream, 1)'
+"fork_patches()" = 'bookmarks(glob:"patch/*")'
+"fork_parents()" = 'heads(trunk() | fork_patches())'
+"fork_head()" = 'exactly(bookmarks(exact:"fork/main"), 1)'
+
+[aliases]
+patch-new = ["new", "trunk()"]
+fork-refresh = ["rebase", "-r", "fork_head()", "-o", "fork_parents()", "--simplify-parents"]
+fork-sync = ["util", "exec", "--", "bash", "-c", "set -euo pipefail; jj git fetch --remote upstream; jj fork-refresh", ""]
+fork-log = ["log", "-r", "connected(trunk() | fork_patches() | fork_head())"]
+fork-parents = ["log", "-r", "fork_parents()"]
+fork-conflicts = ["log", "-r", "fork_head() & conflicts()"]
+fork-stat = ["diff", "--from", "trunk()", "--to", "fork_head()", "--stat"]

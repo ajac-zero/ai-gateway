@@ -16,7 +16,7 @@ Use `jj`, not Git, for version-control mutations in this colocated repository. G
 - Conflict resolutions between otherwise independent patches belong in `fork/main`, not in either patch.
 - Never develop directly in `fork/main` except to resolve integration-only conflicts.
 
-The repository-scoped jj config provides:
+The repository-scoped jj config is versioned as `jj-repo-config.toml` next to this skill. In a new clone, run `scripts/fork-bootstrap` once; it colocates jj, adds the `upstream` remote, fetches, tracks the fork's bookmarks, and installs the config. Orbs run it from `.agents/setup`. The config provides:
 
 ```text
 trunk()
@@ -114,6 +114,32 @@ jj fork-refresh
 ```
 
 Do not rewrite a published PR change without expecting a non-fast-forward bookmark update.
+
+## Automated Updates
+
+`scripts/fork-update` (run from the repository root) handles the routine path:
+
+```bash
+.agents/skills/ai-gateway-patch-workflow/scripts/fork-update check     # read-only report
+.agents/skills/ai-gateway-patch-workflow/scripts/fork-update apply --push
+.agents/skills/ai-gateway-patch-workflow/scripts/fork-update assemble --push
+```
+
+`check` replays each stale patch onto `main@upstream` in a throwaway worktree, then builds, vets, and tests the packages it touches. It reports each patch as `up-to-date`, `clean`, `conflict`, or `broken`. It exits 0 when nothing is stale, 10 when every stale patch is clean, and 20 when an agent is needed. `apply` mutates nothing unless every stale patch is clean. It then rebases them with jj, verifies that each jj result has the same tree as the checked replay, fast-forwards `main`, and assembles `fork/main`. `assemble` moves `fork/main` only after a conflict-free merge passes build, vet, lint, generated-file, and unit-test checks. `--push` pushes `main`, every `patch/*`, and `fork/main` by name. Check logs are written under `/tmp/fork-update-logs/`.
+
+### Agent fixes for one patch
+
+When `check` reports a patch as `conflict` or `broken`, an agent updates that patch alone:
+
+1. Bootstrap if needed, then fetch. Use the upstream commit you were given as the target, not whatever `main@upstream` is now.
+2. Follow "Bring Every Patch Up to Date" below for this one patch, with that commit in place of `trunk()`. Keep the patch's commit series, resolve at the earliest conflicted commit, and fix API drift in the commit that introduced the affected code.
+3. Do not add code from other patches, and do not touch `fork/main`, `main`, or any PR-head bookmark.
+4. Verify that every commit in the series is conflict-free. In a throwaway worktree at the new tip, `go build ./...` must succeed, and `go vet` and `go test` must pass for the packages the patch touches. If the patch touches `api/`, regenerated files must produce no diff.
+5. Move `patch/<name>` to the new tip and push only that bookmark: `jj git push --remote origin -b patch/<name>`.
+
+### Scheduled fork owner
+
+A scheduled Amp thread runs in an orb on project `ajac-zero/ai-gateway`, whose base branch is `fork/main`. It runs `fork-update apply --push`. When `check` reports a conflicted or broken patch, it starts one orb thread per such patch with the "Agent fixes for one patch" procedure, pinned to the same upstream commit. After every fixer reports back, it runs `fork-update assemble --push`. It resolves any conflicts between patches in the new merge, as described in "Resolve Integration Conflicts", before moving `fork/main`.
 
 ## Synchronize With Upstream
 
