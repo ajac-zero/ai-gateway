@@ -16,14 +16,14 @@ The Agent Router acts as a proxy that accepts OpenAI-compatible, Anthropic-compa
 
 **Endpoint:** `POST /v1/chat/completions`
 
-**Status:** Supported for native passthrough to Google Vertex AI
+**Status:** ✅ Fully Supported
 
 **Description:** Create a chat completion response for the given conversation.
 
 **Features:**
 
 - ✅ Streaming and non-streaming responses
-- ✅ Native request and response preservation, including function calling
+- ✅ Function calling
 - ✅ Response format specification (including JSON schema)
 - ✅ Temperature, top_p, and other sampling parameters
 - ✅ System and user messages
