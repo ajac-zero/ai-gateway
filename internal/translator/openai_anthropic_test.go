@@ -160,10 +160,10 @@ func testStreamParserReset(t *testing.T, tr OpenAIChatCompletionTranslator) {
 			require.NoError(t, err)
 
 			if stream {
-				_, body, _, _, err := tr.ResponseBody(nil, bytes.NewBufferString(streamResponse), true, nil)
-				require.NoError(t, err)
-				require.NotEmpty(t, body)
-				require.Contains(t, string(body), `"content":"streamed"`)
+				_, streamBody, _, _, streamErr := tr.ResponseBody(nil, bytes.NewBufferString(streamResponse), true, nil)
+				require.NoError(t, streamErr)
+				require.NotEmpty(t, streamBody)
+				require.Contains(t, string(streamBody), `"content":"streamed"`)
 				continue
 			}
 
