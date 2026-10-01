@@ -1,6 +1,6 @@
 ---
 name: ai-gateway-patch-workflow
-description: Use when changing, adding, rebasing, publishing, retiring, or deploying fork patches in this Envoy AI Gateway repository. Covers jj patch/* bookmarks, upstream PR heads, deploy/integration, deploy-refresh, conflict resolution, and upstream synchronization.
+description: Use when changing, adding, rebasing, publishing, retiring, or deploying fork patches in this Envoy AI Gateway repository. Covers jj patch/* bookmarks, upstream PR heads, fork/main, fork-refresh, conflict resolution, and upstream synchronization.
 ---
 
 # AI Gateway Patch Workflow
@@ -10,27 +10,27 @@ Use `jj`, not Git, for version-control mutations in this colocated repository. G
 ## Repository Model
 
 - `trunk()` is exactly `main@upstream`.
-- Every independently upstreamable change is rooted at `trunk()` and selected for internal deployment by a local `patch/*` bookmark.
-- `deploy/integration` is a generated multi-parent merge of `deploy_parents()`.
+- Every independently upstreamable change is rooted at `trunk()` and selected for the fork branch by a local `patch/*` bookmark.
+- `fork/main` is the fork's combined branch: a generated multi-parent merge of `fork_parents()` (upstream plus every `patch/*`).
 - A GitHub PR may require a separate legacy-named bookmark pointing to the same commit as its `patch/*` bookmark.
-- Conflict resolutions between otherwise independent patches belong in `deploy/integration`, not in either patch.
-- Never develop directly in `deploy/integration` except to resolve integration-only conflicts.
+- Conflict resolutions between otherwise independent patches belong in `fork/main`, not in either patch.
+- Never develop directly in `fork/main` except to resolve integration-only conflicts.
 
 The repository-scoped jj config provides:
 
 ```text
 trunk()
-deploy_patches()
-deploy_parents()
-deploy_head()
+fork_patches()
+fork_parents()
+fork_head()
 
 jj patch-new
-jj deploy-refresh
-jj deploy-sync
-jj deploy-log
-jj deploy-parents
-jj deploy-conflicts
-jj deploy-stat
+jj fork-refresh
+jj fork-sync
+jj fork-log
+jj fork-parents
+jj fork-conflicts
+jj fork-stat
 ```
 
 ## Before Any Patch Work
@@ -39,10 +39,10 @@ Inspect the graph and working copy:
 
 ```bash
 jj status
-jj log -r 'trunk() | deploy_head() | deploy_patches()'
+jj log -r 'trunk() | fork_head() | fork_patches()'
 ```
 
-Do not modify unrelated changes. If `@` is `deploy/integration`, start patch work with `jj new <patch-bookmark>` or `jj new trunk()` rather than editing `@`.
+Do not modify unrelated changes. If `@` is `fork/main`, start patch work with `jj new <patch-bookmark>` or `jj new trunk()` rather than editing `@`.
 
 ## Fix an Existing Patch
 
@@ -57,8 +57,8 @@ Edit and test the code. Then advance the selector:
 
 ```bash
 jj bookmark set patch/native-gemini-ingress -r @
-jj deploy-refresh
-jj deploy-conflicts
+jj fork-refresh
+jj fork-conflicts
 ```
 
 If the patch has a separate PR-head bookmark, advance that bookmark to the same tip too:
@@ -79,18 +79,18 @@ The left count should normally be `0` after synchronization.
 
 ## Create a New Patch
 
-Start from upstream, never from `deploy/integration`:
+Start from upstream, never from `fork/main`:
 
 ```bash
 jj patch-new -m "fix: describe the change"
 ```
 
-Edit and test, then create the deployment selector:
+Edit and test, then create the fork selector:
 
 ```bash
 jj bookmark create patch/<short-name> -r @
-jj deploy-refresh
-jj deploy-conflicts
+jj fork-refresh
+jj fork-conflicts
 ```
 
 Only create a separate PR-head bookmark when publishing upstream requires a different branch name:
@@ -110,22 +110,31 @@ jj edit <change-id>
 After editing, jj automatically rebases descendants. Still run:
 
 ```bash
-jj deploy-refresh
+jj fork-refresh
 ```
 
 Do not rewrite a published PR change without expecting a non-fast-forward bookmark update.
 
 ## Synchronize With Upstream
 
-For routine deployment refresh:
+For a quick refresh of `fork/main` without touching the patches:
 
 ```bash
-jj deploy-sync
+jj fork-sync
 ```
 
-This fetches upstream and recalculates the deployment parent set. It intentionally does not rewrite every patch whenever upstream advances.
+This fetches upstream and recalculates the fork parent set. Upstream changes that conflict with a stale patch then have to be resolved inside `fork/main`, so prefer rebasing the patches when the user asks to bring the fork up to date.
 
-If an individual patch must become directly based on the newest upstream for an upstream PR, rebuild or rebase that patch deliberately and verify its net diff. Do not bulk-rebase all patches just because upstream moved.
+### Bring Every Patch Up to Date
+
+Move each patch onto the newest upstream so that conflicts with upstream are resolved inside the patch that owns the code:
+
+1. `jj git fetch --remote upstream`, then fast-forward `main` with `jj bookmark set main -r main@upstream`.
+2. Before rewriting, save the current `fork/main` commit as a reference tree. The rebased patches together should reproduce it.
+3. Copy each series with `jj duplicate '::patch/<name> ~ ::main@upstream' -o 'trunk()'`. Do not use `jj rebase -s`; see Rebase Safety below.
+4. Resolve conflicts at the earliest conflicted commit of each series with `jj new <commit>`, editing, and `jj squash`. jj carries the resolution to descendants. Fix upstream API drift, such as renamed types or helpers, in the commit that introduced the affected code, so that every commit builds. Regenerate conflicted generated files instead of merging them by hand: run `make apigen apidoc`, then `go tool -modfile=tools/go.mod license-eye header fix`, because `apigen` strips license headers.
+5. Move each `patch/*` bookmark to its new tip. Do not run `jj fork-refresh` on the old merge, because it would carry over resolutions that now live in the patches. Build a fresh merge with `jj new 'fork_parents()' -m "internal: assemble fork patch set"` and run `jj bookmark set fork/main -r @ --allow-backwards`. Compare the result with the reference tree; every difference should be intentional.
+6. Rebasing rewrites published patch heads. Do not move a separate PR-head bookmark unless the user asks to update that PR.
 
 ### Rebase Safety
 
@@ -145,41 +154,41 @@ jj duplicate <revision-set> -o trunk()
 
 Then move the relevant bookmark to the duplicated tip after validating it. For badly tangled merge history, create a clean patch from the final net result rather than preserving meaningless integration merges.
 
-## Refresh Deployment
+## Refresh the Fork Branch
 
 After adding, advancing, removing, or rewriting any `patch/*` bookmark:
 
 ```bash
-jj deploy-refresh
-jj deploy-conflicts
+jj fork-refresh
+jj fork-conflicts
 ```
 
-Run `jj deploy-refresh` a second time after resolution. It should report that nothing changed.
+Run `jj fork-refresh` a second time after resolution. It should report that nothing changed.
 
-The generated deployment may omit `trunk()` as a direct parent when every selected patch already descends from the same trunk. That is expected.
+The generated fork branch may omit `trunk()` as a direct parent when every selected patch already descends from the same trunk. That is expected.
 
 ## Resolve Integration Conflicts
 
 List conflicts:
 
 ```bash
-jj deploy-conflicts
-jj resolve --list -r 'deploy_head()'
+jj fork-conflicts
+jj resolve --list -r 'fork_head()'
 ```
 
-Edit the deployment merge:
+Edit the fork merge:
 
 ```bash
-jj edit deploy/integration
+jj edit fork/main
 ```
 
-Resolve files manually or with `jj resolve`. Keep the resolution in `deploy/integration` when it combines independent patch behavior. Do not contaminate one patch with another patch's code merely to make deployment merge cleanly.
+Resolve files manually or with `jj resolve`. Keep the resolution in `fork/main` when it combines independent patch behavior. Do not contaminate one patch with another patch's code merely to make the fork merge cleanly.
 
 Verify:
 
 ```bash
-jj resolve --list -r 'deploy_head()'
-jj deploy-refresh
+jj resolve --list -r 'fork_head()'
+jj fork-refresh
 ```
 
 No conflict output and an idempotent refresh are required.
@@ -204,29 +213,29 @@ Rewritten PR heads will be shown as sideways moves. Confirm the PR bookmark stil
 
 Never push every bookmark implicitly. Name each intended bookmark.
 
-## Publish Deployment
+## Publish the Fork Branch
 
 Verify first:
 
 ```bash
-jj deploy-refresh
-jj deploy-conflicts
-jj deploy-stat
+jj fork-refresh
+jj fork-conflicts
+jj fork-stat
 ```
 
 Run relevant tests, then dry-run:
 
 ```bash
-jj git push --remote origin --dry-run --bookmark deploy/integration
+jj git push --remote origin --dry-run --bookmark fork/main
 ```
 
 Push only on explicit request:
 
 ```bash
-jj git push --remote origin --bookmark deploy/integration
+jj git push --remote origin --bookmark fork/main
 ```
 
-Build internal images from `deploy/integration`.
+Build internal images from `fork/main`.
 
 ## Retire an Upstreamed Patch
 
@@ -235,8 +244,8 @@ After confirming the change exists in `main@upstream`:
 ```bash
 jj git fetch --remote upstream
 jj bookmark delete patch/<short-name>
-jj deploy-refresh
-jj deploy-conflicts
+jj fork-refresh
+jj fork-conflicts
 ```
 
 If a separate PR-head bookmark is no longer needed, delete it separately. Review remote deletion with:
@@ -247,13 +256,13 @@ jj git push --remote origin --deleted --dry-run
 
 Only apply remote deletion after confirming the plan contains no active PR heads.
 
-## Remove a Patch From Internal Deployment Only
+## Remove a Patch From the Fork Branch Only
 
 Delete or rename only the `patch/*` selector. Keep the PR-head bookmark if upstream review remains active:
 
 ```bash
 jj bookmark delete patch/<short-name>
-jj deploy-refresh
+jj fork-refresh
 ```
 
 The commit remains retained by the PR bookmark.
@@ -264,9 +273,9 @@ Before considering patch graph work complete:
 
 ```bash
 jj status
-jj log -r 'trunk() | deploy_head() | deploy_patches()'
-jj deploy-conflicts
-jj deploy-refresh
+jj log -r 'trunk() | fork_head() | fork_patches()'
+jj fork-conflicts
+jj fork-refresh
 ```
 
 For every rewritten patch:
