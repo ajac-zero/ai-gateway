@@ -133,6 +133,10 @@ Robustness rules built into the script:
 - Below 8 GiB of RAM, the script caps Go and golangci-lint parallelism and sets `GOMEMLIMIT`, so small orbs are not OOM-killed.
 - A shallow clone hides `fork/main`'s parents from jj. When the clone is shallow, `fork-update` first runs `fork-bootstrap`, which unshallows it and rebuilds jj's view.
 
+### Ship button
+
+The Amp project uses Custom Ship with `.agents/ship.md`: pressing Ship in an orb thread turns its changes into a `patch/*` series and runs `fork-update assemble --push`. Amp stores a copy of that prompt in the project, so after editing the file, run `amp projects update ajac-zero/ai-gateway --ship-behavior custom --custom-ship-prompt-file .agents/ship.md`.
+
 ### Agent fixes for one patch
 
 When `check` reports a patch as `conflict` or `broken`, an agent updates that patch alone:
