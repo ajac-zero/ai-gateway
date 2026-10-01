@@ -19,6 +19,17 @@ repo_root="$(git rev-parse --show-toplevel)"
 skill_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+# Fetch every origin branch, even from a single-branch clone, so all patch/* bookmarks appear.
+git config --replace-all remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+
+# Amp orbs clone shallowly. jj records the shallow boundary as a root-parented commit,
+# which hides fork/main's real parents, so fetch full history and rebuild jj's view.
+if [[ "$(git rev-parse --is-shallow-repository)" == true ]]; then
+  echo "fork-bootstrap: unshallowing the clone"
+  git fetch --quiet --unshallow origin
+  rm -rf .jj
+fi
+
 if [[ ! -d .jj ]]; then
   echo "fork-bootstrap: colocating jj with the Git checkout"
   jj git init --colocate
