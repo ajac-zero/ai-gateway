@@ -64,6 +64,9 @@ mkdir -p "$log_dir"
 work_root="$(mktemp -d /tmp/fork-update-wt.XXXXXX)"
 worktrees=()
 cleanup() {
+  if [[ -s "$log_dir/upstream-failures.txt" ]]; then
+    sort -u "$log_dir/upstream-failures.txt" | sed 's/^/note: also fails on upstream, ignored: /'
+  fi
   for wt in "${worktrees[@]}"; do git worktree remove --force "$wt" >/dev/null 2>&1 || true; done
   rm -rf "$work_root"
 }
@@ -72,9 +75,26 @@ trap cleanup EXIT
 test_exclude="${FORK_UPDATE_TEST_EXCLUDE:-tests/controller|tests/crdcel|/tests/e2e|tests/data-plane}"
 git_ident=(-c user.name=fork-update -c user.email=fork-update@localhost)
 
+# Small machines (such as 3 GB orbs) get OOM-killed by parallel compiles and golangci-lint.
+# Below 8 GiB, cap Go parallelism and set a soft memory limit.
+mem_mib="$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo 2>/dev/null || echo 0)"
+lint_concurrency=()
+if [[ "$mem_mib" -gt 0 && "$mem_mib" -lt 8192 ]]; then
+  jobs=$((mem_mib < 4096 ? 1 : 2))
+  export GOFLAGS="${GOFLAGS:+$GOFLAGS }-p=$jobs"
+  export GOGC="${GOGC:-50}"
+  export GOMEMLIMIT="${GOMEMLIMIT:-$((mem_mib * 60 / 100))MiB}"
+  lint_concurrency=(--concurrency="$jobs")
+fi
+
 progress() { printf 'fork-update: %s\n' "$*" >&2; }
 report() { printf '%s\n' "$*"; }
 rev() { jj log --no-graph --color=never -r "exactly($1, 1)" -T 'commit_id'; }
+
+if [[ "$(git rev-parse --is-shallow-repository)" == true ]]; then
+  progress "shallow clone detected; running fork-bootstrap"
+  "$(dirname "${BASH_SOURCE[0]}")/fork-bootstrap" >&2
+fi
 
 if [[ $fetch -eq 1 ]]; then
   progress "fetching origin and upstream"
@@ -124,6 +144,50 @@ generated_files_current() {
   git diff --quiet || { git diff --stat; return 1; }
 }
 
+baseline_dir=""
+
+# baseline_tree returns a worktree at the target, creating it on first use.
+baseline_tree() {
+  if [[ -z "$baseline_dir" ]]; then
+    baseline_dir="$work_root/baseline"
+    git worktree add --quiet --detach "$baseline_dir" "$target"
+    worktrees+=("$baseline_dir")
+  fi
+  printf '%s\n' "$baseline_dir"
+}
+
+# go_test_vs_baseline runs `go test` for the given packages in the current directory.
+# A failing test is retried once; if it still fails, it is run on upstream at the target.
+# Tests that fail on upstream too are upstream or environment failures: they are reported
+# as notes and do not fail the check. Build failures always fail it.
+go_test_vs_baseline() {
+  local out pkg test real=0 base
+  out="$(mktemp "$work_root/test.XXXXXX")"
+  if go test -count=1 "$@" >"$out" 2>&1; then return 0; fi
+  cat "$out"
+  base="$(baseline_tree)"
+  while read -r pkg test; do
+    if [[ "$test" == "-" ]]; then
+      echo "fork-update: $pkg failed without a failing test (build or setup failure)"
+      real=1
+      continue
+    fi
+    if go test -count=1 -run "^${test}\$" "$pkg" >/dev/null 2>&1; then
+      echo "fork-update: note: $pkg $test failed once, then passed on retry (flaky)"
+    elif (cd "$base" && go test -count=1 -run "^${test}\$" "$pkg" >/dev/null 2>&1); then
+      echo "fork-update: $pkg $test fails here but passes on upstream ${target:0:12}"
+      real=1
+    else
+      echo "fork-update: note: $pkg $test also fails on upstream ${target:0:12}; ignoring"
+      printf '%s %s\n' "$pkg" "$test" >>"$log_dir/upstream-failures.txt"
+    fi
+  done < <(awk '
+    /^--- FAIL: / { tests[++n] = $3 }
+    /^FAIL\t/ { if (n == 0) print $2, "-"; for (i = 1; i <= n; i++) print $2, tests[i]; n = 0 }
+  ' "$out")
+  return "$real"
+}
+
 # check_patch_tree runs the patch's standalone checks in the current directory.
 check_patch_tree() {
   local name="$1" pkgs
@@ -131,7 +195,7 @@ check_patch_tree() {
   go build ./... || return 1
   if [[ ${#pkgs[@]} -gt 0 ]]; then
     go vet "${pkgs[@]}" || return 1
-    go test -count=1 "${pkgs[@]}" || return 1
+    go_test_vs_baseline "${pkgs[@]}" || return 1
   fi
   if ! git diff --quiet "$target" HEAD -- api/; then
     generated_files_current || { echo "generated files are out of date for $name"; return 1; }
@@ -242,9 +306,9 @@ assemble() {
     if ! (cd "$wt" &&
       go build ./... &&
       go vet ./... &&
-      go tool -modfile=tools/go.mod golangci-lint run --build-tags=test_crdcel,test_controller,test_extproc,test_e2e ./... &&
+      go tool -modfile=tools/go.mod golangci-lint run "${lint_concurrency[@]}" --build-tags=test_crdcel,test_controller,test_extproc,test_e2e ./... &&
       generated_files_current &&
-      go test $(go list ./... | grep -v -E "$test_exclude")) >"$log" 2>&1; then
+      go_test_vs_baseline $(go list ./... | grep -v -E "$test_exclude")) >"$log" 2>&1; then
       report "fork/main candidate ${merge:0:12} fails checks; fork/main not moved; log: $log"
       [[ -z "$candidate" ]] && jj op restore --quiet "$op"
       return 20

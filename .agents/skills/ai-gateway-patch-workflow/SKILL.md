@@ -127,6 +127,12 @@ Do not rewrite a published PR change without expecting a non-fast-forward bookma
 
 `check` replays each stale patch onto `main@upstream` in a throwaway worktree, then builds, vets, and tests the packages it touches. It reports each patch as `up-to-date`, `clean`, `conflict`, or `broken`. It exits 0 when nothing is stale, 10 when every stale patch is clean, and 20 when an agent is needed. `apply` mutates nothing unless every stale patch is clean. It then rebases them with jj, verifies that each jj result has the same tree as the checked replay, fast-forwards `main`, and assembles `fork/main`. `assemble` moves `fork/main` only after a conflict-free merge passes build, vet, lint, generated-file, and unit-test checks. `--push` pushes `main`, every `patch/*`, and `fork/main` by name. Check logs are written under `/tmp/fork-update-logs/`.
 
+Robustness rules built into the script:
+
+- A failing test is retried once, then run on bare upstream at the target. If it fails there too, it is an upstream or environment failure: the script reports it as `note: also fails on upstream, ignored` and does not block. Treat it as a known problem, not as a patch to fix.
+- Below 8 GiB of RAM, the script caps Go and golangci-lint parallelism and sets `GOMEMLIMIT`, so small orbs are not OOM-killed.
+- A shallow clone hides `fork/main`'s parents from jj. When the clone is shallow, `fork-update` first runs `fork-bootstrap`, which unshallows it and rebuilds jj's view.
+
 ### Agent fixes for one patch
 
 When `check` reports a patch as `conflict` or `broken`, an agent updates that patch alone:
