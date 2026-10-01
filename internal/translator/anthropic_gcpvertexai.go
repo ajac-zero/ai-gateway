@@ -427,11 +427,12 @@ func (a *anthropicToGCPVertexAITranslator) responseBodyStreaming(body io.Reader,
 	}
 	if span != nil {
 		for line := range bytes.SplitSeq(out, []byte("\n")) {
-			if !bytes.HasPrefix(line, sseDataPrefix) {
+			data, ok := cutSSEDataPrefix(line)
+			if !ok {
 				continue
 			}
 			chunk := &anthropic.MessagesStreamChunk{}
-			if unmarshalErr := json.Unmarshal(bytes.TrimPrefix(line, sseDataPrefix), chunk); unmarshalErr == nil {
+			if unmarshalErr := json.Unmarshal(data, chunk); unmarshalErr == nil {
 				span.RecordResponseChunk(chunk)
 			}
 		}
