@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Copyright Envoy AI Gateway Authors
+# SPDX-License-Identifier: Apache-2.0
+# The full text of the Apache license is available in the LICENSE file at
+# the root of the repo.
+
+# Amp orb resume: give jj the thread's Git identity so pushed commits carry an author.
+
+set -euo pipefail
+
+export PATH="$HOME/.local/go/bin:$HOME/.local/bin:$PATH"
+command -v jj >/dev/null || exit 0
+
+name="$(git config user.name || true)"
+email="$(git config user.email || true)"
+if [[ -n "$name" && -n "$email" ]]; then
+  jj config set --user user.name "$name"
+  jj config set --user user.email "$email"
+fi
