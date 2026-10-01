@@ -188,21 +188,62 @@ go_test_vs_baseline() {
   return "$real"
 }
 
-# check_patch_tree runs the patch's standalone checks in the current directory.
+# check_patch_tree runs the patch's standalone checks in the current directory. Before each
+# stage it logs a "fork-update-stage:" marker so a failure can be rated by stage.
 check_patch_tree() {
   local name="$1" pkgs
   mapfile -t pkgs < <(go_packages "$target" HEAD)
+  echo "fork-update-stage: build"
   go build ./... || return 1
   if [[ ${#pkgs[@]} -gt 0 ]]; then
+    echo "fork-update-stage: vet"
     go vet "${pkgs[@]}" || return 1
+    echo "fork-update-stage: test"
     go_test_vs_baseline "${pkgs[@]}" || return 1
   fi
   if ! git diff --quiet "$target" HEAD -- api/; then
+    echo "fork-update-stage: generated"
     generated_files_current || { echo "generated files are out of date for $name"; return 1; }
   fi
 }
 
-declare -A status detail replay_tree
+# Difficulty tiers pick the agent mode for a fixer: low, medium, or high.
+#
+# Conflicts are measured at the first conflicting commit. Generated files do not count,
+# because fixers regenerate them. Thresholds:
+#   low     only generated files conflict, or at most 2 files, 3 hunks, 60 conflicted
+#           lines, and 3 commits left to replay
+#   high    more than 12 files, 20 hunks, 400 conflicted lines, or 10 commits to replay
+#   medium  everything else
+# Broken patches are rated by the failing stage: generated files are low, build or vet is
+# low with at most 2 compiler errors and medium otherwise, and failing tests are high.
+is_generated_file() {
+  case "$1" in
+    api/*/zz_generated.deepcopy.go | manifests/charts/ai-gateway-crds-helm/templates/* | site/docs/api/api.mdx) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+conflict_tier() {
+  local files="$1" hunks="$2" lines="$3" commits="$4"
+  if ((files == 0)); then echo low; return; fi
+  if ((files > 12 || hunks > 20 || lines > 400 || commits > 10)); then echo high; return; fi
+  if ((files <= 2 && hunks <= 3 && lines <= 60 && commits <= 3)); then echo low; return; fi
+  echo medium
+}
+
+broken_tier() {
+  local log="$1" stage errors
+  stage="$(grep -o '^fork-update-stage: [a-z]*' "$log" | tail -n1 | cut -d' ' -f2)"
+  errors="$(grep -cE '^[^ ]+\.go:[0-9]+:[0-9]+: ' "$log" || true)"
+  case "$stage" in
+    generated) echo low ;;
+    build | vet) if ((errors <= 2)); then echo low; else echo medium; fi ;;
+    *) echo high ;;
+  esac
+}
+
+declare -A status detail replay_tree tier
 assemble_conflict=0
 stale=()
 
@@ -218,6 +259,7 @@ replay_patch() {
   base="$(git merge-base "$target" "$tip")"
   if [[ -n "$(git rev-list --merges "$base..$tip")" ]]; then
     status[$name]=conflict
+    tier[$name]=high
     detail[$name]="series contains merge commits"
     return
   fi
@@ -225,12 +267,27 @@ replay_patch() {
   git worktree add --quiet --detach "$wt" "$target"
   worktrees+=("$wt")
   mapfile -t commits < <(git rev-list --reverse "$base..$tip")
-  for c in "${commits[@]}"; do
+  local i f code_files hunks lines counts
+  for i in "${!commits[@]}"; do
+    c="${commits[$i]}"
     if ! git -C "$wt" "${git_ident[@]}" cherry-pick --allow-empty --empty=keep "$c" >/dev/null 2>&1; then
-      files="$(git -C "$wt" diff --name-only --diff-filter=U | paste -sd, -)"
+      mapfile -t files < <(git -C "$wt" diff --name-only --diff-filter=U)
+      code_files=0 hunks=0 lines=0
+      for f in "${files[@]}"; do
+        is_generated_file "$f" && continue
+        code_files=$((code_files + 1))
+        read -r -a counts < <(awk '
+          /^<<<<<<< / { inside = 1; h++; next }
+          /^>>>>>>> / { inside = 0; next }
+          inside && !/^=======$/ { l++ }
+          END { print h + 0, l + 0 }
+        ' "$wt/$f")
+        hunks=$((hunks + counts[0])) lines=$((lines + counts[1]))
+      done
       git -C "$wt" cherry-pick --abort >/dev/null 2>&1 || true
       status[$name]=conflict
-      detail[$name]="first conflict at ${c:0:12} \"$(git log -1 --format=%s "$c")\" in ${files:-unknown files}"
+      tier[$name]="$(conflict_tier "$code_files" "$hunks" "$lines" "$((${#commits[@]} - i))")"
+      detail[$name]="first conflict at ${c:0:12} \"$(git log -1 --format=%s "$c")\": $hunks hunks, $lines lines in $code_files non-generated of ${#files[@]} files ($(printf '%s\n' "${files[@]}" | paste -sd, -)); $((${#commits[@]} - i)) commits left to replay"
       return
     fi
   done
@@ -240,7 +297,8 @@ replay_patch() {
     local log="$log_dir/${name//\//_}.log"
     if ! (cd "$wt" && check_patch_tree "$name") >"$log" 2>&1; then
       status[$name]=broken
-      detail[$name]="replays cleanly but fails checks; log: $log"
+      tier[$name]="$(broken_tier "$log")"
+      detail[$name]="replays cleanly but fails $(grep -o '^fork-update-stage: [a-z]*' "$log" | tail -n1 | cut -d' ' -f2) checks; log: $log"
       return
     fi
   fi
@@ -252,7 +310,7 @@ run_check() {
   local name needs_agent=0
   for name in "${patches[@]}"; do
     replay_patch "$name"
-    report "$name ${status[$name]}${detail[$name]:+ — ${detail[$name]}}"
+    report "$name ${status[$name]}${tier[$name]:+ [tier=${tier[$name]}]}${detail[$name]:+ — ${detail[$name]}}"
     [[ ${status[$name]} == conflict || ${status[$name]} == broken ]] && needs_agent=1
   done
   if [[ $needs_agent -eq 1 ]]; then return 20; fi
@@ -289,7 +347,10 @@ assemble() {
     merge="$(rev @)"
   fi
   if [[ -n "$(jj log --no-graph -r "$merge & conflicts()" -T 'commit_id')" ]]; then
-    report "fork/main conflict — merge ${merge:0:12} has conflicts between patches:"
+    local conflicted merge_tier=medium
+    conflicted="$(jj resolve --list -r "$merge" | wc -l | tr -d ' ')"
+    ((conflicted > 2)) && merge_tier=high
+    report "fork/main conflict [tier=$merge_tier] — merge ${merge:0:12} has conflicts between patches:"
     jj resolve --list -r "$merge" | sed 's/^/  /'
     report "resolve them in that commit, then run: fork-update assemble --candidate ${merge:0:12} --push"
     assemble_conflict=1
