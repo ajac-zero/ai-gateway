@@ -501,6 +501,17 @@ func TestResponsesEndpointSpec_GetTranslator(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, original, body)
 
+	gcpTranslator, err := spec.GetTranslator(filterapi.VersionedAPISchema{Name: filterapi.APISchemaGCPVertexAI}, "gemini-2.5-flash")
+	require.NoError(t, err)
+	headers, body, err = gcpTranslator.RequestBody(
+		[]byte(`{"model":"gemini","input":"hello"}`),
+		&openai.ResponseRequest{Model: "gemini", Input: openai.ResponseNewParamsInputUnion{OfString: ptr.To("hello")}},
+		false,
+	)
+	require.NoError(t, err)
+	require.Equal(t, internalapi.Header{":path", "publishers/google/models/gemini-2.5-flash:generateContent"}, headers[0])
+	require.JSONEq(t, `{"contents":[{"role":"user","parts":[{"text":"hello"}]}],"tools":null,"generationConfig":{}}`, string(body))
+
 	_, err = spec.GetTranslator(filterapi.VersionedAPISchema{Name: filterapi.APISchemaCohere}, "override")
 	require.ErrorIs(t, err, internalapi.ErrInvalidRequestBody)
 	require.ErrorContains(t, err, "unsupported API schema")
