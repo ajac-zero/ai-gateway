@@ -50,6 +50,8 @@ func TestWithTestUpstream(t *testing.T) {
 	// example generated UUID 703482f8-2e5b-4dcc-a872-d74bd66c386.
 	m := regexp.MustCompile("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 	createdReg := regexp.MustCompile(`"created":\d+`)
+	// Responses translated from Anthropic carry gateway-generated timestamps.
+	responsesTimestampReg := regexp.MustCompile(`"(created_at|completed_at)":\d+`)
 
 	config := &filterapi.Config{
 		Version: version.Parse(),
@@ -1456,6 +1458,141 @@ data: {"type":"response.output_item.done","sequence_number":9,"output_index":0,"
 event: response.completed
 data: {"type":"response.completed","sequence_number":10,"response":{"id":"resp_67c","object":"response","created_at":1741290958,"status":"completed","error":null,"incomplete_details":null,"instructions":"You are a helpful assistant.","max_output_tokens":null,"model":"gpt-4.1-2025-04-14","output":[{"id":"msg_67c","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"This is a test.","annotations":[]}]}],"parallel_tool_calls":true,"previous_response_id":null,"reasoning":{"effort":null,"summary":null},"store":true,"temperature":1.0,"text":{"format":{"type":"text"}},"tool_choice":"auto","tools":[],"top_p":1.0,"truncation":"disabled","usage":{"input_tokens":37,"output_tokens":11,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":48},"user":null,"metadata":{}}}
 `,
+		},
+		{
+			name:              "anthropic - /v1/responses",
+			backend:           "anthropic",
+			path:              "/v1/responses",
+			method:            http.MethodPost,
+			expRequestHeaders: map[string]string{"x-api-key": "anthropic-api-key", "anthropic-version": "2023-06-01"},
+			requestBody:       `{"model":"claude-test-model","instructions":"Be brief.","input":[{"role":"user","content":"Weather in Paris?"},{"type":"function_call","call_id":"toolu_01","name":"get_weather","arguments":"{\"city\":\"Paris\"}"},{"type":"function_call_output","call_id":"toolu_01","output":"18C"}],"max_output_tokens":100,"tools":[{"type":"function","name":"get_weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}]}`,
+			expPath:           "/v1/messages",
+			expRequestBody:    `{"max_tokens":100,"messages":[{"content":[{"text":"Weather in Paris?","type":"text"}],"role":"user"},{"content":[{"id":"toolu_01","input":{"city":"Paris"},"name":"get_weather","type":"tool_use"}],"role":"assistant"},{"content":[{"tool_use_id":"toolu_01","content":[{"text":"18C","type":"text"}],"type":"tool_result"}],"role":"user"}],"system":[{"text":"Be brief.","type":"text"}],"tools":[{"input_schema":{"properties":{"city":{"type":"string"}},"type":"object"},"name":"get_weather"}],"model":"claude-test-model"}`,
+			responseBody:      `{"id":"msg_01DP","type":"message","role":"assistant","model":"claude-sonnet-4-5-20250929","content":[{"type":"text","text":"It is 18C in Paris."}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":40,"cache_read_input_tokens":10,"cache_creation_input_tokens":0,"output_tokens":9}}`,
+			expStatus:         http.StatusOK,
+			expResponseBodyFunc: func(t require.TestingT, body []byte) {
+				require.JSONEq(t, `{"id":"resp_01DP","object":"response","created_at":0,"completed_at":0,"status":"completed",
+					"model":"claude-sonnet-4-5-20250929","instructions":"Be brief.","max_output_tokens":100,
+					"output":[{"id":"msg_01DP_0","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"It is 18C in Paris.","annotations":[]}]}],
+					"parallel_tool_calls":true,"temperature":1,"top_p":1,"tool_choice":"auto","truncation":"disabled",
+					"tools":[{"type":"function","name":"get_weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}],
+					"text":{"format":{"type":"text"}},"store":false,"background":false,
+					"usage":{"input_tokens":50,"input_tokens_details":{"cached_tokens":10,"cache_write_tokens":0,"cache_creation_input_tokens":0},
+						"output_tokens":9,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":59}}`,
+					responsesTimestampReg.ReplaceAllString(string(body), `"${1}":0`))
+			},
+		},
+		{
+			name:              "anthropic - /v1/responses - stream",
+			backend:           "anthropic",
+			path:              "/v1/responses",
+			method:            http.MethodPost,
+			responseType:      "sse",
+			expRequestHeaders: map[string]string{"x-api-key": "anthropic-api-key", "anthropic-version": "2023-06-01"},
+			requestBody:       `{"model":"claude-test-model","input":"Say hi","max_output_tokens":50,"stream":true}`,
+			expPath:           "/v1/messages",
+			expRequestBody:    `{"max_tokens":50,"messages":[{"content":[{"text":"Say hi","type":"text"}],"role":"user"}],"stream":true,"model":"claude-test-model"}`,
+			responseBody: `
+event: message_start
+data: {"type":"message_start","message":{"model":"claude-sonnet-4-5-20250929","id":"msg_01Bf","type":"message","role":"assistant","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":9,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}
+
+event: ping
+data: {"type": "ping"}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"! How can I help?"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":8}}
+
+event: message_stop
+data: {"type":"message_stop"}
+`,
+			expStatus: http.StatusOK,
+			expResponseBodyFunc: func(t require.TestingT, body []byte) {
+				var types []string
+				var completed openai.ResponseCompletedEvent
+				for line := range strings.SplitSeq(string(body), "\n") {
+					data, ok := strings.CutPrefix(line, "data: ")
+					if !ok {
+						continue
+					}
+					var ev struct {
+						Type string `json:"type"`
+					}
+					require.NoError(t, json.Unmarshal([]byte(data), &ev))
+					types = append(types, ev.Type)
+					if ev.Type == "response.completed" {
+						require.NoError(t, json.Unmarshal([]byte(data), &completed))
+					}
+				}
+				require.Equal(t, []string{
+					"response.created", "response.in_progress",
+					"response.output_item.added", "response.content_part.added",
+					"response.output_text.delta", "response.output_text.delta",
+					"response.output_text.done", "response.content_part.done", "response.output_item.done",
+					"response.completed",
+				}, types)
+				require.Equal(t, "resp_01Bf", completed.Response.ID)
+				require.Equal(t, "completed", completed.Response.Status)
+				require.Equal(t, "Hi! How can I help?", completed.Response.Output[0].OfOutputMessage.Content.OfContentArray[0].OfOutputText.Text)
+				require.Equal(t, int64(9), completed.Response.Usage.InputTokens)
+				require.Equal(t, int64(8), completed.Response.Usage.OutputTokens)
+				require.Equal(t, int64(17), completed.Response.Usage.TotalTokens)
+			},
+		},
+		{
+			name:           "gcp-anthropicai - /v1/responses",
+			backend:        "gcp-anthropicai",
+			path:           "/v1/responses",
+			method:         http.MethodPost,
+			requestBody:    `{"model":"claude-test-model","input":"Say hi","max_output_tokens":10}`,
+			expPath:        "/v1/projects/gcp-project-name/locations/gcp-region/publishers/anthropic/models/claude-test-model:rawPredict",
+			expRequestBody: `{"max_tokens":10,"messages":[{"content":[{"text":"Say hi","type":"text"}],"role":"user"}],"anthropic_version":"vertex-2023-10-16"}`,
+			responseBody:   `{"id":"msg_vrtx_01","type":"message","role":"assistant","model":"claude-test-model","content":[{"type":"text","text":"Hi!"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":2}}`,
+			expStatus:      http.StatusOK,
+			expResponseBodyFunc: func(t require.TestingT, body []byte) {
+				var resp openai.Response
+				require.NoError(t, json.Unmarshal(body, &resp))
+				require.Equal(t, "resp_vrtx_01", resp.ID)
+				require.Equal(t, "completed", resp.Status)
+				require.Equal(t, "Hi!", resp.Output[0].OfOutputMessage.Content.OfContentArray[0].OfOutputText.Text)
+				require.Equal(t, int64(5), resp.Usage.TotalTokens)
+			},
+		},
+		{
+			name:        "anthropic - /v1/responses - previous_response_id is rejected",
+			backend:     "anthropic",
+			path:        "/v1/responses",
+			method:      http.MethodPost,
+			requestBody: `{"model":"claude-test-model","input":"continue","previous_response_id":"resp_123"}`,
+			expStatus:   http.StatusUnprocessableEntity,
+			expResponseBodyFunc: func(t require.TestingT, body []byte) {
+				require.Contains(t, string(body), `"type":"UnprocessableEntity"`)
+				require.Contains(t, string(body), "previous_response_id (server-side conversation state) is not supported when the backend uses the Anthropic Messages API")
+			},
+		},
+		{
+			name:            "anthropic - /v1/responses - missing max_output_tokens is rejected by Anthropic",
+			backend:         "anthropic",
+			path:            "/v1/responses",
+			method:          http.MethodPost,
+			requestBody:     `{"model":"claude-test-model","input":"hi"}`,
+			expPath:         "/v1/messages",
+			expRequestBody:  `{"max_tokens":0,"messages":[{"content":[{"text":"hi","type":"text"}],"role":"user"}],"model":"claude-test-model"}`,
+			responseStatus:  strconv.Itoa(http.StatusBadRequest),
+			responseBody:    `{"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: Input should be greater than or equal to 1"}}`,
+			expStatus:       http.StatusBadRequest,
+			expResponseBody: `{"type":"error","error":{"type":"invalid_request_error","code":"400","message":"max_tokens: Input should be greater than or equal to 1"}}`,
 		},
 		{
 			name:            "anthropic-openai - /anthropic/v1/messages - OpenAI Backend with Anthropic messages endpoint",
