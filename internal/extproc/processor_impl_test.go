@@ -606,6 +606,45 @@ func bodyFromModel(t *testing.T, model string, stream bool, streamOptions *opena
 	return bytes
 }
 
+func Test_createUserFacingErrorResponse(t *testing.T) {
+	t.Run("wire shape", func(t *testing.T) {
+		resp := createUserFacingErrorResponse(422, "UnprocessableEntity", "invalid request body: missing required field")
+		// The code stays a JSON string, which clients parse.
+		require.JSONEq(t,
+			`{"type":"error","error":{"type":"UnprocessableEntity","code":"422","message":"invalid request body: missing required field"}}`,
+			string(resp.GetImmediateResponse().GetBody()))
+	})
+
+	t.Run("escapes every field", func(t *testing.T) {
+		// Messages often echo client input, e.g. %q-formatted values or model names with quotes.
+		const message = "invalid request body: unsupported size \"4000x1000\" for model `a\\b`\nsecond line\twith tab\x01 and <html> & \u2028"
+		const errorType = `Bad"Type\`
+		resp := createUserFacingErrorResponse(422, errorType, message)
+		immediate := resp.GetImmediateResponse()
+		body := immediate.GetBody()
+
+		var got map[string]any
+		require.NoError(t, json.Unmarshal(body, &got), "body must be valid JSON: %s", body)
+		require.Equal(t, map[string]any{
+			"type": "error",
+			"error": map[string]any{
+				"type":    errorType,
+				"code":    "422",
+				"message": message,
+			},
+		}, got)
+
+		require.Equal(t, typev3.StatusCode(422), immediate.GetStatus().GetCode())
+		var contentLength string
+		for _, h := range immediate.GetHeaders().GetSetHeaders() {
+			if h.GetHeader().GetKey() == "content-length" {
+				contentLength = string(h.GetHeader().GetRawValue())
+			}
+		}
+		require.Equal(t, fmt.Sprint(len(body)), contentLength)
+	})
+}
+
 func Test_chatCompletionProcessorUpstreamFilter_SetBackend(t *testing.T) {
 	headers := map[string]string{":path": "/foo"}
 	mm := &mockMetrics{}
