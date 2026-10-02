@@ -425,6 +425,19 @@ restack_glues() {
   return "$rc"
 }
 
+# nested_series prints each series bookmark that is an ancestor of another series bookmark.
+nested_series() {
+  local inner outer
+  for inner in "${patches[@]}"; do
+    for outer in "${patches[@]}"; do
+      [[ "$inner" == "$outer" ]] && continue
+      if git merge-base --is-ancestor "$(rev "bookmarks(exact:\"$inner\")")" "$(rev "bookmarks(exact:\"$outer\")")"; then
+        printf '%s is contained in %s\n' "$inner" "$outer"
+      fi
+    done
+  done
+}
+
 # conflicting_pairs prints each pair of fork_parents() that conflicts when merged alone, with
 # the glue that resolves it and the command that starts that glue. A glue that resolves a
 # conflict with another glue names every series of both, so glue/a+b and patch/c need
@@ -473,7 +486,17 @@ push_bookmarks() {
 
 # assemble builds and checks a fresh fork/main. Returns 0 on success or no change, 20 otherwise.
 assemble() {
-  local parents current merge wt log
+  local parents current merge wt log nested
+  # Series are independent, so one inside another is a stale or renamed bookmark. Pushing it
+  # would re-create it on origin.
+  nested="$(nested_series)"
+  if [[ -n "$nested" ]]; then
+    report "a series contains another series; fork/main not moved:"
+    printf '%s\n' "$nested" | sed 's/^/  /'
+    report "if the inner one is obsolete (renamed or merged), delete it: jj bookmark delete <name>"
+    report "(or jj bookmark forget <name> if origin never had it); otherwise rebuild it on trunk()"
+    return 20
+  fi
   # A stale glue would merge outdated series, so every glue must sit on current tips first.
   if ! restack_glues; then
     assemble_conflict=1
@@ -490,8 +513,14 @@ assemble() {
       return 20
     fi
   elif [[ "$parents" == "$current" ]]; then
-    report "fork/main already merges trunk() and every patch"
-    return 0
+    # A merge built locally, for example by jj fork-assemble, has not been checked yet.
+    if [[ $run_tests -eq 0 || "$(rev fork/main)" == "$(rev 'fork/main@origin' 2>/dev/null || true)" ]]; then
+      report "fork/main already merges trunk() and every patch"
+      return 0
+    fi
+    # Fall through to the checks below with the existing merge.
+    merge="$(rev fork/main)"
+    progress "fork/main ${merge:0:12} merges every patch but is not on origin yet; checking it"
   else
     jj new --quiet 'fork_parents()' -m "internal: assemble fork patch set"
     merge="$(rev @)"
