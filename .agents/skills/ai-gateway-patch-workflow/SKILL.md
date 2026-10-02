@@ -132,6 +132,7 @@ Robustness rules built into the script:
 - A failing test is retried once, then run on bare upstream at the target. If it fails there too, it is an upstream or environment failure: the script reports it as `note: also fails on upstream, ignored` and does not block. Treat it as a known problem, not as a patch to fix.
 - Below 8 GiB of RAM, the script caps Go and golangci-lint parallelism and sets `GOMEMLIMIT`, so small orbs are not OOM-killed.
 - A shallow clone hides `fork/main`'s parents from jj. When the clone is shallow, `fork-update` first runs `fork-bootstrap`, which unshallows it and rebuilds jj's view.
+- Several threads may ship at once. The repo config sets `remotes.origin.auto-track-bookmarks`, so every fetch turns a `patch/*` that another thread pushed into a local bookmark that `fork_patches()` includes. Before pushing, `--push` fetches origin again. It refuses with exit 20 if origin's `fork/main` moved, or if origin has a `patch/*` commit that the new `fork/main` does not merge. Rerun `fork-update assemble --push` to build a merge that includes the new work.
 
 ### Ship button
 
