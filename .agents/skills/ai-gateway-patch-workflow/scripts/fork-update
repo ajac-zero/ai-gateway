@@ -413,7 +413,7 @@ replay_patch() {
   wt="$work_root/${name//\//_}"
   git worktree add --quiet --detach "$wt" "$target"
   worktrees+=("$wt")
-  mapfile -t tool_commits < <(git rev-list --reverse "$base..$tip")
+  mapfile -t commits < <(git rev-list --reverse "$base..$tip")
   local i f code_files hunks lines counts
   for i in "${!commits[@]}"; do
     c="${commits[$i]}"
@@ -565,7 +565,7 @@ nested_series() {
 conflicting_pairs() {
   local i j glue
   local -a commits names
-  mapfile -t tool_commits < <(jj log --no-graph --color=never -r 'fork_parents()' -T 'commit_id ++ "\n"')
+  mapfile -t commits < <(jj log --no-graph --color=never -r 'fork_parents()' -T 'commit_id ++ "\n"')
   for i in "${!commits[@]}"; do
     names[i]="$(jj log --no-graph --color=never -r "${commits[i]}" \
       -T 'local_bookmarks.filter(|b| b.name().starts_with("patch/") || b.name().starts_with("tooling/") || b.name().starts_with("glue/")).map(|b| b.name()).join("\n")' | head -n1)"
