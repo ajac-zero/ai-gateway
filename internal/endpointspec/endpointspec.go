@@ -363,6 +363,8 @@ func (ImageGenerationEndpointSpec) GetTranslator(schema filterapi.VersionedAPISc
 		return translator.NewImageGenerationOpenAIToOpenAITranslator(schema.OpenAIPrefix(), modelNameOverride), nil
 	case filterapi.APISchemaGCPVertexAI:
 		return translator.NewImageGenerationOpenAIToGCPVertexAITranslator(modelNameOverride), nil
+	case filterapi.APISchemaGoogleAIStudio:
+		return translator.NewImageGenerationOpenAIToGoogleAIStudioTranslator(schema.Version, modelNameOverride), nil
 	default:
 		return nil, fmt.Errorf("%w: unsupported API schema: backend=%s", internalapi.ErrInvalidRequestBody, schema)
 	}
