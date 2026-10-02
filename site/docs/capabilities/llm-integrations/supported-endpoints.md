@@ -327,7 +327,23 @@ curl -F "model=whisper-1" \
 
 - OpenAI
 - Azure OpenAI with an API version that supports Responses, such as `2025-04-01-preview`
+- Anthropic (with automatic translation to the Messages API)
+- GCP Anthropic (with automatic translation to the Messages API)
 - Any OpenAI-compatible provider (Groq, Together AI, Mistral, Tetrate Agent Router Service, etc.)
+
+**Translation to Anthropic:**
+
+For backends with the `Anthropic` or `GCPAnthropic` schema, the gateway translates each Responses request to an Anthropic Messages request and translates the result, including the streaming event sequence, back to the Responses format. The following are translated:
+
+- `instructions`, string `input`, and input items: user, assistant, system, and developer messages, `function_call`, `function_call_output`, and `reasoning` items. System and developer messages become the Anthropic system prompt.
+- Text, image (URL or base64), and PDF (`input_file`) content.
+- `function` tools, `tool_choice` (`auto`, `required`, `none`, or a named function), and `parallel_tool_calls`.
+- `max_output_tokens` (required: Anthropic requires `max_tokens`, so as with Chat Completions, a request without it is sent with `max_tokens: 0` and Anthropic rejects it), `temperature` (0 to 1), `top_p`, `safety_identifier` or `user`, and `service_tier` `auto` or `default`.
+- `text.format` of type `json_schema`, sent as Anthropic structured outputs.
+- `reasoning.effort` and `reasoning.summary`. Models with adaptive thinking receive `thinking.type: adaptive` and `output_config.effort`. Claude 4.5 and earlier models receive extended thinking with a `budget_tokens` value derived from the effort. Thinking is returned as `reasoning` items whose `encrypted_content` lets clients send the thinking back on the next turn. Reasoning items produced by other providers are skipped, because Claude cannot use them.
+- Usage, including cached and cache-write input tokens and reasoning tokens.
+
+Requests that use a feature Anthropic cannot honor fail with HTTP 422 instead of silently dropping the feature: `previous_response_id`, `conversation`, `store: true`, `background: true`, `prompt` templates, `context_management`, `truncation: auto`, `top_logprobs`, presence and frequency penalties, `service_tier` `flex`, `scale`, or `priority`, `prompt_cache_retention: 24h`, `text.verbosity` other than `medium`, `text.format` of type `json_object`, `include` values other than `reasoning.encrypted_content`, OpenAI built-in tools (web search, file search, MCP, code interpreter, computer use, image generation, shell, custom, and others), and OpenAI file IDs. `prompt_cache_key` and `max_tool_calls` are accepted but have no effect, because they only tune OpenAI prompt caching and built-in tools.
 
 **Example:**
 
