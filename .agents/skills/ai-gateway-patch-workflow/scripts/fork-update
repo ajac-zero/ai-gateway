@@ -14,8 +14,13 @@
 #   apply     Runs check. If every stale patch is clean, rebases the patches with jj onto
 #             the target, fast-forwards main, and assembles fork/main. Never mutates
 #             anything when a patch needs an agent.
-#   assemble  Builds a fresh fork/main merge of trunk() and every patch/* and checks it.
-#             Moves fork/main only when the merge is conflict-free and every check passes.
+#   assemble  Restacks every glue/* onto the current tips of the series it merges, then
+#             builds a fresh fork/main merge of fork_parents() and checks it. Moves
+#             fork/main only when the merge is conflict-free and every check passes.
+#
+# "Patches" here are the series rooted at trunk(): patch/* (upstreamable features) and
+# tooling/* (fork-only tooling). A glue/<a>+<b> bookmark is a merge of the series a and b
+# that holds only the resolution of their conflicts.
 #
 #   --target REV  Upstream revision to update to (default: main@upstream after fetching).
 #   --candidate REV
@@ -24,9 +29,10 @@
 #                 Its parents must be exactly fork_parents().
 #   --no-fetch    Do not fetch origin and upstream first.
 #   --no-tests    Skip go build/vet/test (conflict detection only).
-#   --push        After a successful apply or assemble, push main, the patch/* bookmarks,
-#                 and fork/main to origin, naming each bookmark explicitly. Fetches origin
-#                 first and refuses (exit 20) if origin gained work that fork/main lacks.
+#   --push        After a successful apply or assemble, push main, the patch/*, tooling/*,
+#                 and glue/* bookmarks, and fork/main to origin, naming each bookmark
+#                 explicitly. Fetches origin first and refuses (exit 20) if any of those
+#                 bookmarks changed on origin since this run started.
 #
 # Report lines go to stdout; progress goes to stderr. Exit codes:
 #   0   nothing to do, or the requested mutation succeeded
@@ -97,15 +103,35 @@ if [[ "$(git rev-parse --is-shallow-repository)" == true ]]; then
   "$(dirname "${BASH_SOURCE[0]}")/fork-bootstrap" >&2
 fi
 
+# Orb snapshots can carry an older jj repo config, whose fork_parents() may miss a tier, so
+# install the config that ships with this script whenever the repo's copy differs.
+skill_config="$(dirname "${BASH_SOURCE[0]}")/../jj-repo-config.toml"
+if [[ -f "$skill_config" ]] && ! cmp -s "$skill_config" "$(jj config path --repo)"; then
+  cp "$skill_config" "$(jj config path --repo)"
+  progress "installed the skill's jj repo config"
+fi
+
 if [[ $fetch -eq 1 ]]; then
   progress "fetching origin and upstream"
   jj git fetch --remote origin --quiet
   jj git fetch --remote upstream --quiet
 fi
+# Track series and glues that other threads pushed, even where the repo config predates
+# auto-tracking, so fork_parents() includes them.
+jj bookmark track 'patch/*' 'tooling/*' 'glue/*' --remote origin >/dev/null 2>&1
+
+# origin_refs lists origin's fork bookmarks and their commits, as last fetched.
+origin_refs() {
+  git for-each-ref --format='%(refname:lstrip=3) %(objectname)' refs/remotes/origin/fork/main \
+    refs/remotes/origin/patch refs/remotes/origin/tooling refs/remotes/origin/glue
+}
+origin_snapshot="$(origin_refs)"
 
 target="$(rev "$target_rev")"
-mapfile -t patches < <(jj bookmark list --color=never 'patch/*' -T 'if(!remote, name ++ "\n")' | sort -u)
-[[ ${#patches[@]} -gt 0 ]] || { echo "fork-update: no patch/* bookmarks" >&2; exit 1; }
+# Skip bookmarks deleted locally: jj lists them until the deletion is pushed.
+mapfile -t patches < <(jj bookmark list --color=never 'patch/* | tooling/*' -T 'if(!remote && present, name ++ "\n")' 2>/dev/null | sort -u)
+[[ ${#patches[@]} -gt 0 ]] || { echo "fork-update: no patch/* or tooling/* bookmarks" >&2; exit 1; }
+mapfile -t glues < <(jj bookmark list --color=never 'glue/*' -T 'if(!remote && present, name ++ "\n")' 2>/dev/null | sort -u)
 
 # go_packages lists the existing Go package directories changed between two commits.
 go_packages() {
@@ -319,30 +345,127 @@ run_check() {
   return 0
 }
 
-# push_bookmarks publishes main, the patch/* bookmarks, and fork/main. Another thread may have
-# shipped while this run was checking, so it first fetches origin again. It refuses to push when
-# origin's fork/main moved or origin has a patch/* commit that fork/main does not merge, because
-# pushing would drop that work from fork/main. Returns 20 in that case.
+# glue_names prints the series names a glue merges: glue/a+b merges a and b.
+glue_names() { tr '+' '\n' <<<"${1#glue/}" | LC_ALL=C sort -u; }
+
+# glue_series prints the bookmark of each series a glue names: patch/<name> or tooling/<name>.
+glue_series() {
+  local glue="$1" name found prefix
+  local -a names
+  mapfile -t names < <(glue_names "$glue")
+  if ((${#names[@]} < 2)); then
+    echo "$glue must name at least two series, as glue/<a>+<b>"
+    return 1
+  fi
+  for name in "${names[@]}"; do
+    found=()
+    for prefix in patch tooling; do
+      if [[ " ${patches[*]} " == *" $prefix/$name "* ]]; then found+=("$prefix/$name"); fi
+    done
+    case ${#found[@]} in
+      1) printf '%s\n' "${found[0]}" ;;
+      0) echo "$glue names $name, but neither patch/$name nor tooling/$name exists; delete the glue if that series was retired"; return 1 ;;
+      *) echo "$glue names $name, which is ambiguous between patch/$name and tooling/$name"; return 1 ;;
+    esac
+  done
+}
+
+# glue_parents prints the sorted commits a glue must merge: the tips of the series it names,
+# reduced to heads together with any glue that merges a proper subset of those series, so
+# glue/a+b+c merges glue/a+b and patch/c. On error it prints the reason and returns 1.
+glue_parents() {
+  local glue="$1" members other series revs=()
+  members="$(glue_series "$glue")" || { printf '%s\n' "$members"; return 1; }
+  while read -r series; do revs+=("bookmarks(exact:\"$series\")"); done <<<"$members"
+  for other in "${glues[@]}"; do
+    [[ "$other" == "$glue" ]] && continue
+    if [[ "$(glue_names "$other")" != "$(glue_names "$glue")" &&
+      -z "$(LC_ALL=C comm -23 <(glue_names "$other") <(glue_names "$glue"))" ]]; then
+      revs+=("bookmarks(exact:\"$other\")")
+    fi
+  done
+  jj log --no-graph --color=never -r "heads($(IFS='|'; echo "${revs[*]}"))" -T 'commit_id ++ "\n"' | LC_ALL=C sort
+}
+
+# restack_glues moves every glue whose parents are not the current tips of its series onto
+# those tips. jj duplicate carries the glue's resolution to the new parents. Glues that merge
+# fewer series go first, so a nested glue lands on its inner glue's new commit. Returns 20
+# if a glue is invalid or has conflicts; the bookmark still moves, so an agent can resolve
+# the conflict in the glue itself.
+restack_glues() {
+  local glue expected actual out new c files rc=0
+  local -a ordered onto
+  mapfile -t ordered < <(for glue in "${glues[@]}"; do
+    printf '%d %s\n' "$(glue_names "$glue" | wc -l)" "$glue"
+  done | LC_ALL=C sort -n | cut -d' ' -f2)
+  for glue in "${ordered[@]}"; do
+    if ! expected="$(glue_parents "$glue")"; then
+      report "glue invalid — $expected"
+      rc=20
+      continue
+    fi
+    actual="$(jj log --no-graph --color=never -r "parents(bookmarks(exact:\"$glue\"))" -T 'commit_id ++ "\n"' | LC_ALL=C sort)"
+    if [[ "$expected" != "$actual" ]]; then
+      onto=()
+      while read -r c; do onto+=(-o "$c"); done <<<"$expected"
+      out="$(jj duplicate --color=never "bookmarks(exact:\"$glue\")" "${onto[@]}" 2>&1)"
+      new="$(rev "$(awk '$1 == "Duplicated" { print $5 }' <<<"$out")")"
+      jj bookmark set "$glue" -r "$new" --allow-backwards --quiet
+      report "$glue -> ${new:0:12} (restacked)"
+    fi
+    new="$(rev "bookmarks(exact:\"$glue\")")"
+    if [[ -n "$(jj log --no-graph -r "$new & conflicts()" -T 'commit_id')" ]]; then
+      files="$(jj resolve --list -r "$new" | wc -l | tr -d ' ')"
+      report "glue conflict [tier=$( ((files > 2)) && echo high || echo medium)] — $glue at ${new:0:12} has conflicts:"
+      jj resolve --list -r "$new" | sed 's/^/  /'
+      report "resolve them in the glue (jj new ${new:0:12}, edit, jj squash), then run: fork-update assemble --push"
+      rc=20
+    fi
+  done
+  return "$rc"
+}
+
+# conflicting_pairs prints each pair of fork_parents() that conflicts when merged alone, with
+# the glue that resolves it and the command that starts that glue. A glue that resolves a
+# conflict with another glue names every series of both, so glue/a+b and patch/c need
+# glue/a+b+c, whose parents are exactly glue/a+b and patch/c.
+conflicting_pairs() {
+  local i j glue
+  local -a commits names
+  mapfile -t commits < <(jj log --no-graph --color=never -r 'fork_parents()' -T 'commit_id ++ "\n"')
+  for i in "${!commits[@]}"; do
+    names[i]="$(jj log --no-graph --color=never -r "${commits[i]}" \
+      -T 'local_bookmarks.filter(|b| b.name().starts_with("patch/") || b.name().starts_with("tooling/") || b.name().starts_with("glue/")).map(|b| b.name()).join("\n")' | head -n1)"
+  done
+  for ((i = 0; i < ${#commits[@]}; i++)); do
+    for ((j = i + 1; j < ${#commits[@]}; j++)); do
+      if ! git merge-tree --write-tree --name-only --no-messages "${commits[i]}" "${commits[j]}" >/dev/null 2>&1; then
+        glue="glue/$(for name in "${names[i]}" "${names[j]}"; do
+          if [[ "$name" == glue/* ]]; then glue_names "$name"; else printf '%s\n' "${name#*/}"; fi
+        done | LC_ALL=C sort -u | paste -sd+ -)"
+        printf '%s + %s: add %s with: jj new %s %s\n' "${names[i]}" "${names[j]}" "$glue" \
+          "'bookmarks(exact:\"${names[i]}\")'" "'bookmarks(exact:\"${names[j]}\")'"
+      fi
+    done
+  done
+}
+
+# push_bookmarks publishes main, the series and glue bookmarks, and fork/main. Another thread
+# may have shipped while this run was checking, so it first fetches origin again and refuses
+# to push if fork/main or any patch/*, tooling/*, or glue/* bookmark changed on origin since
+# the run started: pushing would drop that work from fork/main. Returns 20 in that case.
 push_bookmarks() {
-  local args=(-b fork/main) name head remote_before missing
-  head="$(rev fork/main)"
-  remote_before="$(rev 'fork/main@origin')"
+  local args=(-b fork/main) name changed
   jj git fetch --remote origin --quiet
-  if [[ "$(rev 'fork/main@origin')" != "$remote_before" ]]; then
-    report "fork/main moved on origin while fork-update ran; fork/main not pushed"
+  changed="$({ diff <(printf '%s\n' "$origin_snapshot") <(origin_refs) || true; } |
+    sed -n 's/^[<>] \([^ ]*\) .*/\1/p' | sort -u)"
+  if [[ -n "$changed" ]]; then
+    report "origin changed while fork-update ran; nothing pushed. Changed on origin:"
+    printf '%s\n' "$changed" | sed 's/^/  /'
     report "rerun: fork-update assemble --push"
     return 20
   fi
-  missing="$(jj log --no-graph --color=never \
-    -r "remote_bookmarks(glob:\"patch/*\", exact:\"origin\") ~ ::$head" \
-    -T 'remote_bookmarks.filter(|b| b.remote() == "origin").join(" ") ++ "\n"')"
-  if [[ -n "$missing" ]]; then
-    report "origin has patch/* commits that fork/main ${head:0:12} does not merge; fork/main not pushed:"
-    printf '%s\n' "$missing" | sed 's/^/  /'
-    report "rerun: fork-update assemble --push"
-    return 20
-  fi
-  for name in "${patches[@]}"; do args+=(-b "$name"); done
+  for name in "${patches[@]}" "${glues[@]}"; do args+=(-b "$name"); done
   if git merge-base --is-ancestor "$(rev 'main@origin')" "$(rev main)"; then args+=(-b main); fi
   progress "pushing ${args[*]}"
   jj git push --remote origin "${args[@]}"
@@ -351,6 +474,11 @@ push_bookmarks() {
 # assemble builds and checks a fresh fork/main. Returns 0 on success or no change, 20 otherwise.
 assemble() {
   local parents current merge wt log
+  # A stale glue would merge outdated series, so every glue must sit on current tips first.
+  if ! restack_glues; then
+    assemble_conflict=1
+    return 20
+  fi
   parents="$(jj log --no-graph --color=never -r 'fork_parents()' -T 'commit_id ++ "\n"' | sort)"
   current="$(jj log --no-graph --color=never -r 'parents(fork_head())' -T 'commit_id ++ "\n"' 2>/dev/null | sort || true)"
   local op
@@ -374,7 +502,17 @@ assemble() {
     ((conflicted > 2)) && merge_tier=high
     report "fork/main conflict [tier=$merge_tier] — merge ${merge:0:12} has conflicts between patches:"
     jj resolve --list -r "$merge" | sed 's/^/  /'
-    report "resolve them in that commit, then run: fork-update assemble --candidate ${merge:0:12} --push"
+    local pairs
+    pairs="$(conflicting_pairs)"
+    if [[ -n "$pairs" ]]; then
+      printf '%s\n' "$pairs" | sed 's/^/  conflicting pair: /'
+      report "add the first pair's glue: run its jj new command, resolve the conflicts, and create"
+      report "the named glue bookmark on the result. Then rerun: fork-update assemble --push."
+      report "Later pairs often resolve themselves once the first glue exists."
+      [[ -z "$candidate" ]] && jj op restore --quiet "$op"
+    else
+      report "no single pair conflicts; resolve the merge in that commit, then run: fork-update assemble --candidate ${merge:0:12} --push"
+    fi
     assemble_conflict=1
     return 20
   fi
@@ -393,6 +531,8 @@ assemble() {
       generated_files_current &&
       go_test_vs_baseline $(go list ./... | grep -v -E "$test_exclude")) >"$log" 2>&1; then
       report "fork/main candidate ${merge:0:12} fails checks; fork/main not moved; log: $log"
+      report "if the failure comes from combining two patches that pass on their own, such as a"
+      report "duplicate declaration, fix it in a glue/<a>+<b> for that pair"
       [[ -z "$candidate" ]] && jj op restore --quiet "$op"
       return 20
     fi
