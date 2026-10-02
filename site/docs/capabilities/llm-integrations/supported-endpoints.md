@@ -327,7 +327,22 @@ curl -F "model=whisper-1" \
 
 - OpenAI
 - Azure OpenAI with an API version that supports Responses, such as `2025-04-01-preview`
+- GCP Vertex AI (Gemini models, with automatic translation; see the limitations below)
 - Any OpenAI-compatible provider (Groq, Together AI, Mistral, Tetrate Agent Router Service, etc.)
+
+**GCP Vertex AI translation:**
+
+Requests to a GCP Vertex AI backend are translated to the Gemini `generateContent` and `streamGenerateContent` methods. Streaming responses use the standard Responses event sequence (`response.created`, `response.output_item.added`, `response.output_text.delta`, `response.function_call_arguments.delta`, `response.completed`, and so on).
+
+- ✅ String and message-list input, including multi-turn conversations, `instructions`, and `system` or `developer` messages
+- ✅ Image inputs (`input_image` URLs and data URLs) and file inputs (`input_file` URLs and inline data)
+- ✅ Function tools, `tool_choice` (`auto`, `none`, `required`, a named function, or `allowed_tools`), and `function_call` / `function_call_output` items
+- ✅ `reasoning.effort` mapped to a Gemini thinking level (Gemini 3) or thinking budget (earlier models) following [Google's OpenAI compatibility table](https://ai.google.dev/gemini-api/docs/openai#thinking); `reasoning.summary` returns Gemini thoughts as reasoning summaries
+- ✅ Gemini thought signatures are returned as `encrypted_content` on reasoning items. Send reasoning items back in `input` to keep multi-turn function calling working on Gemini 3 models.
+- ✅ `temperature`, `top_p`, `max_output_tokens`, `presence_penalty`, `frequency_penalty`, and `text.format` (`json_object` and `json_schema`)
+- ✅ Token usage, including cached and reasoning tokens
+
+Vertex AI is stateless and does not run OpenAI built-in tools, so the gateway returns `422 Unprocessable Entity` for features it cannot honor: `previous_response_id`, `conversation`, `store: true`, `background: true`, prompt templates, `context_management`, `truncation: auto`, `service_tier` values other than `auto` or `default`, `top_logprobs`, `text.verbosity` other than `medium`, `include` values other than `reasoning.encrypted_content`, `parallel_tool_calls: false` with tools, OpenAI built-in, MCP, and custom tools, OpenAI file IDs, and input items produced by built-in tools.
 
 **Example:**
 
