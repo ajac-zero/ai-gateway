@@ -226,6 +226,17 @@ curl -H "Content-Type: application/json" \
 
 - OpenAI
 - Any OpenAI-compatible provider that supports image generations
+- GCP Vertex AI Gemini image models, such as `gemini-2.5-flash-image` (with automatic translation; see below)
+
+**GCP Vertex AI translation:**
+
+Requests to a GCP Vertex AI backend are translated to the Gemini `generateContent` method with `responseModalities: ["TEXT", "IMAGE"]`. Each generated image is returned as `b64_json`.
+
+- `size` is converted to the closest Gemini aspect ratio (`1:1`, `2:3`, `3:2`, `3:4`, `4:3`, `4:5`, `5:4`, `9:16`, `16:9`, or `21:9`). For example, `1536x1024` becomes `3:2` and `1792x1024` becomes `16:9`. `auto` or no size lets the model choose.
+- `n` must be `1`, because Gemini image models return a single candidate; larger values are rejected with `422 Unprocessable Entity`.
+- `response_format: url` is not supported by Vertex AI; images are always returned as `b64_json`.
+- `quality`, `style`, `background`, `moderation`, `output_format`, and `user` are ignored.
+- Token usage comes from the Gemini `usageMetadata`; output tokens include thinking tokens.
 
 **Example:**
 
@@ -606,7 +617,7 @@ The following table summarizes which providers support which endpoints:
 | [Hunyuan](https://cloud.tencent.com/document/product/1729/111007)                                     |        ⚠️        |     ⚠️      |     ⚠️     |        ❌        |         ❌         |      ❌      |   ❌   |     ❌     |    ❌    | Via OpenAI-compatible API                                                                                            |
 | [Tencent LLM Knowledge Engine](https://www.tencentcloud.com/document/product/1255/70381)              |        ⚠️        |     ❌      |     ❌     |        ❌        |         ❌         |      ❌      |   ❌   |     ❌     |    ❌    | Via OpenAI-compatible API                                                                                            |
 | [Tetrate Agent Router Service (TARS)](https://router.tetrate.ai/)                                     |        ⚠️        |     ⚠️      |     ⚠️     |        ❌        |         ❌         |      ❌      |   ❌   |     ❌     |    ❌    | Via OpenAI-compatible API                                                                                            |
-| [Google Vertex AI](https://cloud.google.com/vertex-ai/docs/reference/rest)                            |        ✅        |     🚧      |     ✅     |        ❌        |         ❌         |      ❌      |   ❌   |     ❌     |    ✅    | Via API translation                                                                                                  |
+| [Google Vertex AI](https://cloud.google.com/vertex-ai/docs/reference/rest)                            |        ✅        |     🚧      |     ✅     |        ✅        |         ❌         |      ❌      |   ❌   |     ❌     |    ✅    | Via API translation                                                                                                  |
 | [Anthropic on Vertex AI](https://cloud.google.com/vertex-ai/generative-ai/docs/partner-models/claude) |        ✅        |     ❌      |     🚧     |        ❌        |         ✅         |      ✅      |   ❌   |     ❌     |    ✅    | Via API translation                                                                                                  |
 | [Anthropic on AWS Bedrock](https://aws.amazon.com/bedrock/anthropic/)                                 |        🚧        |     ❌      |     ❌     |        ❌        |         ✅         |      ✅      |   ❌   |     ❌     |    ✅    | Native Anthropic API                                                                                                 |
 | [SambaNova](https://docs.sambanova.ai/sambastudio/latest/open-ai-api.html)                            |        ✅        |     ⚠️      |     ✅     |        ❌        |         ❌         |      ❌      |   ❌   |     ❌     |    ❌    | Via OpenAI-compatible API                                                                                            |
