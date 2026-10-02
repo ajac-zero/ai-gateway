@@ -512,6 +512,26 @@ func TestResponsesEndpointSpec_GetTranslator(t *testing.T) {
 	require.Equal(t, internalapi.Header{":path", "publishers/google/models/gemini-2.5-flash:generateContent"}, headers[0])
 	require.JSONEq(t, `{"contents":[{"role":"user","parts":[{"text":"hello"}]}],"tools":null,"generationConfig":{}}`, string(body))
 
+	anthropicTranslator, err := spec.GetTranslator(filterapi.VersionedAPISchema{Name: filterapi.APISchemaAnthropic, Prefix: "custom"}, "claude-opus-4-7")
+	require.NoError(t, err)
+	headers, body, err = anthropicTranslator.RequestBody(nil, &openai.ResponseRequest{
+		Model: "alias", Input: openai.ResponseNewParamsInputUnion{OfString: ptr.To("hello")},
+	}, false)
+	require.NoError(t, err)
+	require.Contains(t, headers, internalapi.Header{":path", "/custom/messages"})
+	require.JSONEq(t, `{"model":"claude-opus-4-7","max_tokens":0,"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`, string(body))
+
+	gcpAnthropicTranslator, err := spec.GetTranslator(filterapi.VersionedAPISchema{Name: filterapi.APISchemaGCPAnthropic, Version: "vertex-2023-10-16"}, "")
+	require.NoError(t, err)
+	headers, _, err = gcpAnthropicTranslator.RequestBody(nil, &openai.ResponseRequest{
+		Model: "claude-opus-4-7", Input: openai.ResponseNewParamsInputUnion{OfString: ptr.To("hello")},
+	}, false)
+	require.NoError(t, err)
+	require.Contains(t, headers, internalapi.Header{":path", "publishers/anthropic/models/claude-opus-4-7:rawPredict"})
+
+	_, err = spec.GetTranslator(filterapi.VersionedAPISchema{Name: filterapi.APISchemaAWSAnthropic}, "override")
+	require.ErrorIs(t, err, internalapi.ErrInvalidRequestBody)
+
 	_, err = spec.GetTranslator(filterapi.VersionedAPISchema{Name: filterapi.APISchemaCohere}, "override")
 	require.ErrorIs(t, err, internalapi.ErrInvalidRequestBody)
 	require.ErrorContains(t, err, "unsupported API schema")
