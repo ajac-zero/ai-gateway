@@ -32,9 +32,6 @@ import (
 )
 
 const (
-	// anthropicVersionHeaderName is the header the native Anthropic API requires on every request.
-	// OpenAI clients never send it, so the translator sets it.
-	anthropicVersionHeaderName = "anthropic-version"
 	// anthropicAPIVersion is the only stable version of the native Anthropic Messages API.
 	// https://platform.claude.com/docs/en/api/versioning
 	anthropicAPIVersion = "2023-06-01"
