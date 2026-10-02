@@ -255,10 +255,17 @@ go_test_vs_baseline() {
       real=1
       continue
     fi
-    if go test -count=1 -run "^${test}\$" "$pkg" >/dev/null 2>&1; then
-      echo "fork-update: note: $pkg $test failed once, then passed on retry (flaky)"
-    elif (cd "$base" && go test -count=1 -run "^${test}\$" "$pkg" >/dev/null 2>&1); then
-      echo "fork-update: $pkg $test fails here but passes on upstream ${target:0:12}"
+    # A test is blamed on the patch only when it fails every retry here and passes every
+    # run on upstream. Intermittent upstream tests otherwise fail a single comparison by
+    # chance (a 35% flake passes one upstream run 65% of the time).
+    local attempt passed=0
+    for attempt in 1 2 3; do
+      if go test -count=1 -run "^${test}\$" "$pkg" >/dev/null 2>&1; then passed=1; break; fi
+    done
+    if ((passed)); then
+      echo "fork-update: note: $pkg $test failed, then passed on retry $attempt (flaky)"
+    elif (cd "$base" && go test -count=5 -run "^${test}\$" "$pkg" >/dev/null 2>&1); then
+      echo "fork-update: $pkg $test fails every retry here and passes 5 of 5 runs on upstream ${target:0:12}"
       real=1
     else
       echo "fork-update: note: $pkg $test also fails on upstream ${target:0:12}; ignoring"
