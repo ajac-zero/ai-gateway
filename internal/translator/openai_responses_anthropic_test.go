@@ -28,8 +28,8 @@ func newTestResponsesAnthropicTranslator(t *testing.T, override string) *openAIT
 	return tr
 }
 
-// translateResponsesRequest parses a raw Responses request and runs RequestBody.
-func translateResponsesRequest(t *testing.T, tr *openAIToAnthropicTranslatorV1Responses, raw string) ([]internalapi.Header, []byte, error) {
+// translateAnthropicResponsesRequest parses a raw Responses request and runs RequestBody.
+func translateAnthropicResponsesRequest(t *testing.T, tr *openAIToAnthropicTranslatorV1Responses, raw string) ([]internalapi.Header, []byte, error) {
 	t.Helper()
 	var req openai.ResponseRequest
 	require.NoError(t, json.Unmarshal([]byte(raw), &req))
@@ -293,7 +293,7 @@ func TestResponsesAnthropic_RequestBody(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tr := newTestResponsesAnthropicTranslator(t, tc.override)
-			headers, body, err := translateResponsesRequest(t, tr, tc.request)
+			headers, body, err := translateAnthropicResponsesRequest(t, tr, tc.request)
 			require.NoError(t, err)
 			require.JSONEq(t, tc.expBody, string(body))
 			require.Equal(t, "/v1/messages", headerValue(headers, pathHeaderName))
@@ -312,7 +312,7 @@ func mustAtoi(t *testing.T, s string) int {
 
 func TestResponsesAnthropic_RequestBody_Stream(t *testing.T) {
 	tr := newTestResponsesAnthropicTranslator(t, "")
-	_, body, err := translateResponsesRequest(t, tr, `{"model":"claude-opus-4-7","input":"Hi","max_output_tokens":5,"stream":true}`)
+	_, body, err := translateAnthropicResponsesRequest(t, tr, `{"model":"claude-opus-4-7","input":"Hi","max_output_tokens":5,"stream":true}`)
 	require.NoError(t, err)
 	require.JSONEq(t, `{"model":"claude-opus-4-7","max_tokens":5,"stream":true,
 		"messages":[{"role":"user","content":[{"type":"text","text":"Hi"}]}]}`, string(body))
@@ -321,7 +321,7 @@ func TestResponsesAnthropic_RequestBody_Stream(t *testing.T) {
 	require.Equal(t, "text/event-stream", headerValue(headers, contentTypeHeaderName))
 
 	// A retry re-runs RequestBody and must reset the streaming state.
-	_, _, err = translateResponsesRequest(t, tr, `{"model":"claude-opus-4-7","input":"Hi","max_output_tokens":5}`)
+	_, _, err = translateAnthropicResponsesRequest(t, tr, `{"model":"claude-opus-4-7","input":"Hi","max_output_tokens":5}`)
 	require.NoError(t, err)
 	headers, err = tr.ResponseHeaders(nil)
 	require.NoError(t, err)
@@ -349,7 +349,7 @@ func TestResponsesAnthropic_RequestBody_GCP(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tr := NewResponsesOpenAIToGCPAnthropicTranslator("", "").(*openAIToAnthropicTranslatorV1Responses)
-			headers, body, err := translateResponsesRequest(t, tr, tc.request)
+			headers, body, err := translateAnthropicResponsesRequest(t, tr, tc.request)
 			require.NoError(t, err)
 			require.JSONEq(t, tc.expBody, string(body))
 			require.Equal(t, tc.expPath, headerValue(headers, pathHeaderName))
@@ -407,7 +407,7 @@ func TestResponsesAnthropic_RequestBody_Unsupported(t *testing.T) {
 				request = request[:len(request)-1] + `,"input":"Hi"}`
 			}
 			tr := newTestResponsesAnthropicTranslator(t, "")
-			_, _, err := translateResponsesRequest(t, tr, request)
+			_, _, err := translateAnthropicResponsesRequest(t, tr, request)
 			require.ErrorIs(t, err, internalapi.ErrInvalidRequestBody)
 			require.ErrorContains(t, err, tc.expErr)
 		})
@@ -481,7 +481,7 @@ func TestResponsesAnthropic_ResponseBody(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tr := newTestResponsesAnthropicTranslator(t, "")
-			_, _, err := translateResponsesRequest(t, tr, tc.request)
+			_, _, err := translateAnthropicResponsesRequest(t, tr, tc.request)
 			require.NoError(t, err)
 			headers, body, usage, model, err := tr.ResponseBody(nil, strings.NewReader(tc.anthropicResponse), true, nil)
 			require.NoError(t, err)
@@ -497,7 +497,7 @@ func TestResponsesAnthropic_ResponseBody(t *testing.T) {
 
 func TestResponsesAnthropic_ResponseBody_Refusal(t *testing.T) {
 	tr := newTestResponsesAnthropicTranslator(t, "")
-	_, _, err := translateResponsesRequest(t, tr, `{"model":"claude-opus-4-7","input":"Hi"}`)
+	_, _, err := translateAnthropicResponsesRequest(t, tr, `{"model":"claude-opus-4-7","input":"Hi"}`)
 	require.NoError(t, err)
 	_, body, _, _, err := tr.ResponseBody(nil, strings.NewReader(
 		`{"id":"msg_3","type":"message","role":"assistant","model":"claude-opus-4-7","content":[],"stop_reason":"refusal","usage":{"input_tokens":1,"output_tokens":0}}`), true, nil)
@@ -524,16 +524,16 @@ func anthropicSSE(events ...string) string {
 	return b.String()
 }
 
-type responsesSSEEvent struct {
+type anthropicResponsesSSEEvent struct {
 	name string
 	data map[string]any
 }
 
-// parseResponsesSSE splits translated output into events and checks that the SSE event name
+// parseAnthropicResponsesSSE splits translated output into events and checks that the SSE event name
 // matches the JSON type and that sequence numbers count up from zero.
-func parseResponsesSSE(t *testing.T, raw []byte) []responsesSSEEvent {
+func parseAnthropicResponsesSSE(t *testing.T, raw []byte) []anthropicResponsesSSEEvent {
 	t.Helper()
-	var events []responsesSSEEvent
+	var events []anthropicResponsesSSEEvent
 	for block := range strings.SplitSeq(strings.TrimSpace(string(raw)), "\n\n") {
 		lines := strings.Split(block, "\n")
 		require.Len(t, lines, 2, "event %q", block)
@@ -545,12 +545,12 @@ func parseResponsesSSE(t *testing.T, raw []byte) []responsesSSEEvent {
 		require.NoError(t, json.Unmarshal([]byte(data), &parsed))
 		require.Equal(t, name, parsed["type"])
 		require.EqualValues(t, len(events), parsed["sequence_number"])
-		events = append(events, responsesSSEEvent{name: name, data: parsed})
+		events = append(events, anthropicResponsesSSEEvent{name: name, data: parsed})
 	}
 	return events
 }
 
-func eventNames(events []responsesSSEEvent) []string {
+func anthropicEventNames(events []anthropicResponsesSSEEvent) []string {
 	names := make([]string, len(events))
 	for i, e := range events {
 		names[i] = e.name
@@ -577,7 +577,7 @@ func TestResponsesAnthropic_Stream_TextAndToolUse(t *testing.T) {
 
 	// Feed the stream in small chunks to exercise buffering across ResponseBody calls.
 	tr := newTestResponsesAnthropicTranslator(t, "")
-	_, _, err := translateResponsesRequest(t, tr, `{"model":"claude-opus-4-7","input":"Weather?","stream":true,"tools":[{"type":"function","name":"get_weather"}]}`)
+	_, _, err := translateAnthropicResponsesRequest(t, tr, `{"model":"claude-opus-4-7","input":"Weather?","stream":true,"tools":[{"type":"function","name":"get_weather"}]}`)
 	require.NoError(t, err)
 	var out []byte
 	var usage metrics.TokenUsage
@@ -590,7 +590,7 @@ func TestResponsesAnthropic_Stream_TextAndToolUse(t *testing.T) {
 		usage = u
 	}
 
-	events := parseResponsesSSE(t, out)
+	events := parseAnthropicResponsesSSE(t, out)
 	require.Equal(t, []string{
 		"response.created",
 		"response.in_progress",
@@ -607,7 +607,7 @@ func TestResponsesAnthropic_Stream_TextAndToolUse(t *testing.T) {
 		"response.function_call_arguments.done",
 		"response.output_item.done",
 		"response.completed",
-	}, eventNames(events))
+	}, anthropicEventNames(events))
 
 	created := events[0].data["response"].(map[string]any)
 	require.Equal(t, "resp_01S", created["id"])
@@ -651,11 +651,11 @@ func TestResponsesAnthropic_Stream_TextAndToolUse(t *testing.T) {
 
 	// Feeding the whole stream at once must produce identical events.
 	tr2 := newTestResponsesAnthropicTranslator(t, "")
-	_, _, err = translateResponsesRequest(t, tr2, `{"model":"claude-opus-4-7","input":"Weather?","stream":true,"tools":[{"type":"function","name":"get_weather"}]}`)
+	_, _, err = translateAnthropicResponsesRequest(t, tr2, `{"model":"claude-opus-4-7","input":"Weather?","stream":true,"tools":[{"type":"function","name":"get_weather"}]}`)
 	require.NoError(t, err)
 	_, whole, _, _, err := tr2.ResponseBody(nil, strings.NewReader(stream), true, nil)
 	require.NoError(t, err)
-	require.Equal(t, eventNames(events), eventNames(parseResponsesSSE(t, whole)))
+	require.Equal(t, anthropicEventNames(events), anthropicEventNames(parseAnthropicResponsesSSE(t, whole)))
 	require.Equal(t, normalizeCompletedAt(out), normalizeCompletedAt(whole))
 }
 
@@ -689,12 +689,12 @@ func TestResponsesAnthropic_Stream_ThinkingAndCumulativeUsage(t *testing.T) {
 		`{"type":"message_stop"}`,
 	)
 	tr := newTestResponsesAnthropicTranslator(t, "")
-	_, _, err := translateResponsesRequest(t, tr, `{"model":"claude-opus-4-7","input":"Q","stream":true,"reasoning":{"effort":"high","summary":"auto"}}`)
+	_, _, err := translateAnthropicResponsesRequest(t, tr, `{"model":"claude-opus-4-7","input":"Q","stream":true,"reasoning":{"effort":"high","summary":"auto"}}`)
 	require.NoError(t, err)
 	_, out, usage, _, err := tr.ResponseBody(nil, strings.NewReader(stream), true, nil)
 	require.NoError(t, err)
 
-	events := parseResponsesSSE(t, out)
+	events := parseAnthropicResponsesSSE(t, out)
 	require.Equal(t, []string{
 		"response.created",
 		"response.in_progress",
@@ -714,7 +714,7 @@ func TestResponsesAnthropic_Stream_ThinkingAndCumulativeUsage(t *testing.T) {
 		"response.content_part.done",
 		"response.output_item.done",
 		"response.incomplete",
-	}, eventNames(events))
+	}, anthropicEventNames(events))
 
 	summaryDone, _ := json.Marshal(events[7].data)
 	require.JSONEq(t, `{"type":"response.reasoning_summary_part.done","sequence_number":7,"item_id":"rs_T_0","output_index":0,"summary_index":0,
@@ -763,17 +763,17 @@ func TestResponsesAnthropic_Stream_ToolInputInBlockStart(t *testing.T) {
 		`{"type":"message_stop"}`,
 	)
 	tr := newTestResponsesAnthropicTranslator(t, "")
-	_, _, err := translateResponsesRequest(t, tr, `{"model":"claude-opus-4-7","input":"Q","stream":true}`)
+	_, _, err := translateAnthropicResponsesRequest(t, tr, `{"model":"claude-opus-4-7","input":"Q","stream":true}`)
 	require.NoError(t, err)
 	_, out, _, _, err := tr.ResponseBody(nil, strings.NewReader(stream), true, nil)
 	require.NoError(t, err)
-	events := parseResponsesSSE(t, out)
+	events := parseAnthropicResponsesSSE(t, out)
 	require.Equal(t, []string{
 		"response.created", "response.in_progress",
 		"response.output_item.added", "response.function_call_arguments.delta",
 		"response.function_call_arguments.done", "response.output_item.done",
 		"response.completed",
-	}, eventNames(events))
+	}, anthropicEventNames(events))
 	require.JSONEq(t, `{"q":"x"}`, events[4].data["arguments"].(string))
 }
 
@@ -803,11 +803,11 @@ func TestResponsesAnthropic_Stream_Failures(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tr := newTestResponsesAnthropicTranslator(t, "")
-			_, _, err := translateResponsesRequest(t, tr, `{"model":"claude-opus-4-7","input":"Q","stream":true}`)
+			_, _, err := translateAnthropicResponsesRequest(t, tr, `{"model":"claude-opus-4-7","input":"Q","stream":true}`)
 			require.NoError(t, err)
 			_, out, usage, _, err := tr.ResponseBody(nil, strings.NewReader(tc.stream), true, nil)
 			require.NoError(t, err)
-			events := parseResponsesSSE(t, out)
+			events := parseAnthropicResponsesSSE(t, out)
 			last := events[len(events)-1]
 			require.Equal(t, "response.failed", last.name)
 			resp := last.data["response"].(map[string]any)
