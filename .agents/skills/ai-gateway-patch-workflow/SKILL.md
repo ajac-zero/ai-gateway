@@ -15,7 +15,7 @@ Use `jj`, not Git, for version-control mutations in this colocated repository. G
   | Tier | Rooted at | Holds | Goes upstream |
   |---|---|---|---|
   | `patch/<name>` | `trunk()` | One independently upstreamable change | Yes |
-  | `tooling/<name>` | `trunk()` | Fork-only tooling, such as this skill, `.agents/setup`, and the Ship prompt | Never |
+  | `tooling/<name>` | `trunk()` | Fork-only tooling, such as this skill, `.agents/setup`, the Ship prompt, and the root `AGENTS.md` | Never |
   | `glue/<a>+<b>` | The tips of series `a` and `b` | Only the resolution of the conflicts between `a` and `b` | Never |
 
 - "Series" means a `patch/*` or `tooling/*` bookmark. `fork_patches()` selects both, and `fork_glue()` selects `glue/*`.
