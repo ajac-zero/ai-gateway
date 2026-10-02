@@ -11,6 +11,11 @@
 "fork_parents()" = 'heads(trunk() | fork_patches())'
 "fork_head()" = 'exactly(bookmarks(exact:"fork/main"), 1)'
 
+# Track the fork's bookmarks on every fetch, so a patch/* that another thread pushed
+# becomes a local bookmark and fork_patches() includes it.
+[remotes.origin]
+auto-track-bookmarks = "main | fork/main | patch/*"
+
 [aliases]
 patch-new = ["new", "trunk()"]
 fork-refresh = ["rebase", "-r", "fork_head()", "-o", "fork_parents()", "--simplify-parents"]
