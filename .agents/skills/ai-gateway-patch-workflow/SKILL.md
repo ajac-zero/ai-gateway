@@ -158,6 +158,8 @@ Robustness rules built into the script:
 
 - A failing test is retried once, then run on bare upstream at the target. If it fails there too, it is an upstream or environment failure: the script reports it as `note: also fails on upstream, ignored` and does not block. Treat it as a known problem, not as a patch to fix.
 - Below 8 GiB of RAM, the script caps Go and golangci-lint parallelism and sets `GOMEMLIMIT`, so small orbs are not OOM-killed.
+- When `fork/main` already merges every series but differs from `fork/main@origin`, as after `jj fork-assemble`, `assemble` still runs the full checks on it before pushing.
+- `assemble` refuses while one series contains another. Series are independent, so a nested one is a stale or renamed bookmark that `--push` would otherwise re-create on origin. Delete it, or rebuild it on `trunk()`.
 - Orb snapshots can carry an older jj repo config. `fork-update` installs the `jj-repo-config.toml` next to it whenever the repo's copy differs.
 - A shallow clone hides `fork/main`'s parents from jj. When the clone is shallow, `fork-update` first runs `fork-bootstrap`, which unshallows it and rebuilds jj's view.
 - Several threads may ship at once. The repo config sets `remotes.origin.auto-track-bookmarks`, and `fork-update` also tracks every `patch/*`, `tooling/*`, and `glue/*` on origin after fetching. A bookmark that another thread pushed therefore becomes a local bookmark that `fork_parents()` includes. Before pushing, `--push` fetches origin again. It refuses with exit 20 if `fork/main` or any `patch/*`, `tooling/*`, or `glue/*` bookmark changed on origin since the run started. Rerun `fork-update assemble --push` to build a merge that includes the new work.
