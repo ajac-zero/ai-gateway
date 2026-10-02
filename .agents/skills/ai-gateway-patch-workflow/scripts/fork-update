@@ -25,7 +25,8 @@
 #   --no-fetch    Do not fetch origin and upstream first.
 #   --no-tests    Skip go build/vet/test (conflict detection only).
 #   --push        After a successful apply or assemble, push main, the patch/* bookmarks,
-#                 and fork/main to origin, naming each bookmark explicitly.
+#                 and fork/main to origin, naming each bookmark explicitly. Fetches origin
+#                 first and refuses (exit 20) if origin gained work that fork/main lacks.
 #
 # Report lines go to stdout; progress goes to stderr. Exit codes:
 #   0   nothing to do, or the requested mutation succeeded
@@ -318,8 +319,29 @@ run_check() {
   return 0
 }
 
+# push_bookmarks publishes main, the patch/* bookmarks, and fork/main. Another thread may have
+# shipped while this run was checking, so it first fetches origin again. It refuses to push when
+# origin's fork/main moved or origin has a patch/* commit that fork/main does not merge, because
+# pushing would drop that work from fork/main. Returns 20 in that case.
 push_bookmarks() {
-  local args=(-b fork/main) name
+  local args=(-b fork/main) name head remote_before missing
+  head="$(rev fork/main)"
+  remote_before="$(rev 'fork/main@origin')"
+  jj git fetch --remote origin --quiet
+  if [[ "$(rev 'fork/main@origin')" != "$remote_before" ]]; then
+    report "fork/main moved on origin while fork-update ran; fork/main not pushed"
+    report "rerun: fork-update assemble --push"
+    return 20
+  fi
+  missing="$(jj log --no-graph --color=never \
+    -r "remote_bookmarks(glob:\"patch/*\", exact:\"origin\") ~ ::$head" \
+    -T 'remote_bookmarks.filter(|b| b.remote() == "origin").join(" ") ++ "\n"')"
+  if [[ -n "$missing" ]]; then
+    report "origin has patch/* commits that fork/main ${head:0:12} does not merge; fork/main not pushed:"
+    printf '%s\n' "$missing" | sed 's/^/  /'
+    report "rerun: fork-update assemble --push"
+    return 20
+  fi
   for name in "${patches[@]}"; do args+=(-b "$name"); done
   if git merge-base --is-ancestor "$(rev 'main@origin')" "$(rev main)"; then args+=(-b main); fi
   progress "pushing ${args[*]}"
@@ -421,12 +443,12 @@ case "$mode" in
       report "restoring operation ${apply_op:0:12}; no bookmarks moved"
       jj op restore --quiet "$apply_op"
     fi
-    if [[ $rc -eq 0 && $push -eq 1 ]]; then push_bookmarks; fi
+    if [[ $rc -eq 0 && $push -eq 1 ]]; then push_bookmarks || exit $?; fi
     exit "$rc"
     ;;
   assemble)
     rc=0; assemble || rc=$?
-    if [[ $rc -eq 0 && $push -eq 1 ]]; then push_bookmarks; fi
+    if [[ $rc -eq 0 && $push -eq 1 ]]; then push_bookmarks || exit $?; fi
     exit "$rc"
     ;;
 esac
