@@ -232,11 +232,11 @@ curl -H "Content-Type: application/json" \
 
 Requests to a GCP Vertex AI backend are translated to the Gemini `generateContent` method with `responseModalities: ["TEXT", "IMAGE"]`. Each generated image is returned as `b64_json`.
 
-- `size` is converted to the closest Gemini aspect ratio (`1:1`, `2:3`, `3:2`, `3:4`, `4:3`, `4:5`, `5:4`, `9:16`, `16:9`, or `21:9`). For example, `1536x1024` becomes `3:2` and `1792x1024` becomes `16:9`. `auto` or no size lets the model choose.
-- `n` must be `1`, because Gemini image models return a single candidate; larger values are rejected with `422 Unprocessable Entity`.
-- `response_format: url` is not supported by Vertex AI; images are always returned as `b64_json`.
-- `quality`, `style`, `background`, `moderation`, `output_format`, and `user` are ignored.
-- Token usage comes from the Gemini `usageMetadata`; output tokens include thinking tokens.
+- `size` selects a Gemini aspect ratio (`1:1`, `2:3`, `3:2`, `3:4`, `4:3`, `4:5`, `5:4`, `9:16`, `16:9`, or `21:9`) when it is within 3% of one. For example, `1536x1024` becomes `3:2` and `1792x1024` becomes `16:9`. The model chooses the pixel resolution, and the response `size` reports the dimensions it generated. `auto` or no size lets the model choose the aspect ratio. Other sizes, such as `4000x1000`, are rejected.
+- `output_format` (`png`, `jpeg`, or `webp`) and `output_compression` are sent as `imageConfig.imageOutputOptions`. If Vertex AI returns a different format than requested, the gateway returns `502 Bad Gateway`.
+- Parameters that Gemini cannot honor are rejected with `422 Unprocessable Entity` instead of being ignored: `n` greater than `1`, `response_format: url`, `stream`, `partial_images`, `style`, and any `quality`, `background`, or `moderation` other than `auto`. `user` is ignored, because it does not affect the generated image.
+- If Vertex AI responds without an image, the gateway returns an OpenAI error instead of an empty `data` list: `400 Bad Request` with type `content_policy_violation` when a safety filter blocked the prompt or the image, and `502 Bad Gateway` otherwise, such as for a text-only answer. The error message includes the Gemini finish reason and any text the model returned.
+- Token usage comes from the Gemini `usageMetadata`; output tokens include thinking tokens, and `input_tokens_details` splits prompt tokens into text and image tokens.
 
 **Example:**
 
