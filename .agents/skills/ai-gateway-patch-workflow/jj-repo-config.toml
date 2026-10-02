@@ -7,20 +7,38 @@
 
 [revset-aliases]
 "trunk()" = 'exactly(main@upstream, 1)'
-"fork_patches()" = 'bookmarks(glob:"patch/*")'
-"fork_parents()" = 'heads(trunk() | fork_patches())'
+# Series rooted at trunk(): patch/* (upstreamable features) and tooling/* (fork-only tooling).
+"fork_patches()" = 'bookmarks(glob:"patch/*") | bookmarks(glob:"tooling/*")'
+# Merges of two or more series that hold only the resolution of their conflicts.
+"fork_glue()" = 'bookmarks(glob:"glue/*")'
+# A glue descends from the series it merges, so heads() replaces them with the glue.
+"fork_parents()" = 'heads(trunk() | fork_patches() | fork_glue())'
 "fork_head()" = 'exactly(bookmarks(exact:"fork/main"), 1)'
 
-# Track the fork's bookmarks on every fetch, so a patch/* that another thread pushed
-# becomes a local bookmark and fork_patches() includes it.
+# Track the fork's bookmarks on every fetch, so a series or glue that another thread
+# pushed becomes a local bookmark that fork_parents() includes.
 [remotes.origin]
-auto-track-bookmarks = "main | fork/main | patch/*"
+auto-track-bookmarks = "main | fork/main | patch/* | tooling/* | glue/*"
 
 [aliases]
 patch-new = ["new", "trunk()"]
 fork-refresh = ["rebase", "-r", "fork_head()", "-o", "fork_parents()", "--simplify-parents"]
 fork-sync = ["util", "exec", "--", "bash", "-c", "set -euo pipefail; jj git fetch --remote upstream; jj fork-refresh", ""]
-fork-log = ["log", "-r", "connected(trunk() | fork_patches() | fork_head())"]
+# Restacks stale glues and rebuilds fork/main locally from fork_parents(), without fetching,
+# testing, or pushing. Use it after changing any patch/*, tooling/*, or glue/* bookmark.
+# A working copy on a series rooted at trunk() has no .agents/, so the script then comes
+# from tooling/agent-workflow, which holds its newest version.
+fork-assemble = ["util", "exec", "--", "bash", "-c", '''
+set -euo pipefail
+script="$(jj root)/.agents/skills/ai-gateway-patch-workflow/scripts/fork-update"
+if [[ ! -f "$script" ]]; then
+  script="$(mktemp)"
+  jj file show -r 'bookmarks(exact:"tooling/agent-workflow")' \
+    'root:".agents/skills/ai-gateway-patch-workflow/scripts/fork-update"' >"$script"
+fi
+exec bash "$script" assemble --no-tests --no-fetch "$@"
+''', ""]
+fork-log = ["log", "-r", "connected(trunk() | fork_patches() | fork_glue() | fork_head())"]
 fork-parents = ["log", "-r", "fork_parents()"]
 fork-conflicts = ["log", "-r", "fork_head() & conflicts()"]
 fork-stat = ["diff", "--from", "trunk()", "--to", "fork_head()", "--stat"]
