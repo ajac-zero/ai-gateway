@@ -1323,6 +1323,15 @@ func TestGatewayController_bspToFilterAPIBackendAuth(t *testing.T) {
 				},
 			},
 		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "bsp-googleai-apikey", Namespace: namespace},
+			Spec: aigv1b1.BackendSecurityPolicySpec{
+				Type: aigv1b1.BackendSecurityPolicyTypeGoogleAIKey,
+				GoogleAIKey: &aigv1b1.BackendSecurityPolicyGoogleAIKey{
+					SecretRef: &gwapiv1.SecretObjectReference{Name: "api-key-secret"},
+				},
+			},
+		},
 	} {
 		require.NoError(t, fakeClient.Create(t.Context(), bsp))
 	}
@@ -1426,6 +1435,12 @@ func TestGatewayController_bspToFilterAPIBackendAuth(t *testing.T) {
 					Organization: "org-123",
 					Project:      "proj_456",
 				},
+			},
+		},
+		{
+			bspName: "bsp-googleai-apikey",
+			exp: &filterapi.BackendAuth{
+				GoogleAIKey: &filterapi.GoogleAIKeyAuth{Key: "thisisapikey"},
 			},
 		},
 	} {
@@ -1730,6 +1745,18 @@ func TestResolveCredentialOverride(t *testing.T) {
 		)
 		require.NoError(t, err)
 		require.Equal(t, "x-aigw-anthropic-api-key", result.HeaderName)
+	})
+
+	t.Run("fromRequestHeaders default header for GoogleAIKey", func(t *testing.T) {
+		result, err := resolveCredentialOverride(
+			aigv1b1.BackendSecurityPolicyTypeGoogleAIKey,
+			&aigv1b1.BackendSecurityPolicyCredentialOverride{
+				FromRequestHeaders: &aigv1b1.CredentialOverrideFromRequestHeaders{},
+			},
+			true,
+		)
+		require.NoError(t, err)
+		require.Equal(t, "x-aigw-goog-api-key", result.HeaderName)
 	})
 
 	t.Run("fromDynamicMetadata", func(t *testing.T) {
