@@ -220,6 +220,45 @@ func TestWithTestUpstream(t *testing.T) {
 			},
 		},
 		{
+			name:        "gcp-vertexai - /v1/images/generations - unsupported aspect ratio rejected",
+			backend:     "gcp-vertexai",
+			path:        "/v1/images/generations",
+			method:      http.MethodPost,
+			requestBody: `{"model":"gemini-2.5-flash-image","prompt":"a cat","size":"4000x1000"}`,
+			expStatus:   http.StatusUnprocessableEntity,
+			expResponseBodyFunc: func(t require.TestingT, body []byte) {
+				// The body must be valid JSON, so the message must not contain unescaped quotes.
+				var errResp openai.Error
+				require.NoError(t, json.Unmarshal(body, &errResp))
+				require.Contains(t, errResp.Error.Message, "size 4000x1000 does not match an aspect ratio supported by GCP Vertex AI Gemini image models")
+			},
+		},
+		{
+			name:               "gcp-vertexai - /v1/images/generations - safety block becomes 400",
+			backend:            "gcp-vertexai",
+			path:               "/v1/images/generations",
+			method:             http.MethodPost,
+			requestBody:        `{"model":"gemini-2.5-flash-image","prompt":"something disallowed"}`,
+			expPath:            "/v1/projects/gcp-project-name/locations/gcp-region/publishers/google/models/gemini-2.5-flash-image:generateContent",
+			responseStatus:     strconv.Itoa(http.StatusOK),
+			responseBody:       `{"candidates":[{"content":{"role":"model","parts":[{"text":"I can't help with that."}]},"finishReason":"IMAGE_SAFETY"}],"usageMetadata":{"promptTokenCount":5,"totalTokenCount":5}}`,
+			expStatus:          http.StatusBadRequest,
+			expResponseBody:    `{"type":"error","error":{"type":"content_policy_violation","code":"400","message":"GCP Vertex AI returned no image: finish reason IMAGE_SAFETY. Model text: I can't help with that."}}`,
+			expResponseHeaders: map[string]string{"Content-Type": "application/json"},
+		},
+		{
+			name:            "gcp-vertexai - /v1/images/generations - text-only answer becomes 502",
+			backend:         "gcp-vertexai",
+			path:            "/v1/images/generations",
+			method:          http.MethodPost,
+			requestBody:     `{"model":"gemini-2.5-flash-image","prompt":"a cat"}`,
+			expPath:         "/v1/projects/gcp-project-name/locations/gcp-region/publishers/google/models/gemini-2.5-flash-image:generateContent",
+			responseStatus:  strconv.Itoa(http.StatusOK),
+			responseBody:    `{"candidates":[{"content":{"role":"model","parts":[{"text":"Which cat?"}]},"finishReason":"STOP"}]}`,
+			expStatus:       http.StatusBadGateway,
+			expResponseBody: `{"type":"error","error":{"type":"GCPVertexAIBackendError","code":"502","message":"GCP Vertex AI returned no image: finish reason STOP. Model text: Which cat?"}}`,
+		},
+		{
 			name:            "unknown path",
 			path:            "/unknown",
 			requestBody:     `{"prompt": "hello"}`,
