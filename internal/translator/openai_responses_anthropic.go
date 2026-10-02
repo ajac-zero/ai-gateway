@@ -47,8 +47,6 @@ const (
 	// redacted_thinking data, and both from reasoning state produced by other providers.
 	anthropicThinkingEncryptedPrefix         = "anthropic.thinking:"
 	anthropicRedactedThinkingEncryptedPrefix = "anthropic.redacted_thinking:" // #nosec G101 -- Prefix of opaque reasoning state, not a credential.
-
-	responsesIncludeReasoningEncryptedContent = "reasoning.encrypted_content"
 )
 
 // extendedThinkingOnlyModels lists Claude models that support thinking only through

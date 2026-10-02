@@ -400,6 +400,8 @@ func (ResponsesEndpointSpec) GetTranslator(schema filterapi.VersionedAPISchema, 
 		return translator.NewResponsesOpenAIToAWSOpenAITranslator(schema.OpenAIPrefix(), modelNameOverride), nil
 	case filterapi.APISchemaAzureOpenAI:
 		return translator.NewResponsesOpenAIToAzureOpenAITranslator(schema.Version, modelNameOverride), nil
+	case filterapi.APISchemaGCPVertexAI:
+		return translator.NewResponsesOpenAIToGCPVertexAITranslator(modelNameOverride), nil
 	case filterapi.APISchemaAnthropic:
 		return translator.NewResponsesOpenAIToAnthropicTranslator(schema.AnthropicPrefix(), modelNameOverride), nil
 	case filterapi.APISchemaGCPAnthropic:
