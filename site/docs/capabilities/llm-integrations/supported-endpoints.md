@@ -227,6 +227,17 @@ curl -H "Content-Type: application/json" \
 - OpenAI
 - Any OpenAI-compatible provider that supports image generations
 - Google AI Studio (native Gemini `generateContent`), via the `GoogleAIStudio` backend schema. The Gemini image bytes returned as `inlineData` are base64-encoded into the OpenAI `b64_json` field.
+- GCP Vertex AI Gemini image models, such as `gemini-2.5-flash-image` (with automatic translation; see below)
+
+**GCP Vertex AI translation:**
+
+Requests to a GCP Vertex AI backend are translated to the Gemini `generateContent` method with `responseModalities: ["TEXT", "IMAGE"]`. Each generated image is returned as `b64_json`.
+
+- `size` selects a Gemini aspect ratio (`1:1`, `2:3`, `3:2`, `3:4`, `4:3`, `4:5`, `5:4`, `9:16`, `16:9`, or `21:9`) when it is within 3% of one. For example, `1536x1024` becomes `3:2` and `1792x1024` becomes `16:9`. The model chooses the pixel resolution, and the response `size` reports the dimensions it generated. `auto` or no size lets the model choose the aspect ratio. Other sizes, such as `4000x1000`, are rejected.
+- `output_format` (`png`, `jpeg`, or `webp`) and `output_compression` are sent as `imageConfig.imageOutputOptions`. If Vertex AI returns a different format than requested, the gateway returns `502 Bad Gateway`.
+- Parameters that Gemini cannot honor are rejected with `422 Unprocessable Entity` instead of being ignored: `n` greater than `1`, `response_format: url`, `stream`, `partial_images`, `style`, and any `quality`, `background`, or `moderation` other than `auto`. `user` is ignored, because it does not affect the generated image.
+- If Vertex AI responds without an image, the gateway returns an OpenAI error instead of an empty `data` list: `400 Bad Request` with type `content_policy_violation` when a safety filter blocked the prompt or the image, and `502 Bad Gateway` otherwise, such as for a text-only answer. The error message includes the Gemini finish reason and any text the model returned.
+- Token usage comes from the Gemini `usageMetadata`; output tokens include thinking tokens, and `input_tokens_details` splits prompt tokens into text and image tokens.
 
 **Example:**
 
@@ -680,7 +691,7 @@ The following table summarizes which providers support which endpoints:
 | [Hunyuan](https://cloud.tencent.com/document/product/1729/111007)                                     |        ⚠️        |     ⚠️      |     ⚠️     |        ❌        |         ❌         |      ❌      |   ❌   |     ❌     |    ❌    | Via OpenAI-compatible API                                                                                            |
 | [Tencent LLM Knowledge Engine](https://www.tencentcloud.com/document/product/1255/70381)              |        ⚠️        |     ❌      |     ❌     |        ❌        |         ❌         |      ❌      |   ❌   |     ❌     |    ❌    | Via OpenAI-compatible API                                                                                            |
 | [Tetrate Agent Router Service (TARS)](https://router.tetrate.ai/)                                     |        ⚠️        |     ⚠️      |     ⚠️     |        ❌        |         ❌         |      ❌      |   ❌   |     ❌     |    ❌    | Via OpenAI-compatible API                                                                                            |
-| [Google Vertex AI](https://cloud.google.com/vertex-ai/docs/reference/rest)                            |        ✅        |     🚧      |     ✅     |        ❌        |         ❌         |      ❌      |   ❌   |     ❌     |    ✅    | Via API translation                                                                                                  |
+| [Google Vertex AI](https://cloud.google.com/vertex-ai/docs/reference/rest)                            |        ✅        |     🚧      |     ✅     |        ✅        |         ❌         |      ❌      |   ❌   |     ❌     |    ✅    | Via API translation                                                                                                  |
 | [Anthropic on Vertex AI](https://cloud.google.com/vertex-ai/generative-ai/docs/partner-models/claude) |        ✅        |     ❌      |     🚧     |        ❌        |         ✅         |      ✅      |   ❌   |     ❌     |    ✅    | Via API translation                                                                                                  |
 | [Anthropic on AWS Bedrock](https://aws.amazon.com/bedrock/anthropic/)                                 |        🚧        |     ❌      |     ❌     |        ❌        |         ✅         |      ✅      |   ❌   |     ❌     |    ✅    | Native Anthropic API                                                                                                 |
 | [SambaNova](https://docs.sambanova.ai/sambastudio/latest/open-ai-api.html)                            |        ✅        |     ⚠️      |     ✅     |        ❌        |         ❌         |      ❌      |   ❌   |     ❌     |    ❌    | Via OpenAI-compatible API                                                                                            |
