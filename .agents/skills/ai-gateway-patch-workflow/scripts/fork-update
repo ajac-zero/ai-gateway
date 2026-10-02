@@ -34,6 +34,9 @@
 #                 explicitly. Fetches origin first and refuses (exit 20) if any of those
 #                 bookmarks changed on origin since this run started.
 #
+# Before anything else, every local main, fork/main, patch/*, tooling/*, and glue/* bookmark is
+# reconciled against origin (see reconcile_bookmarks), since orb snapshots carry stale ones.
+#
 # Report lines go to stdout; progress goes to stderr. Exit codes:
 #   0   nothing to do, or the requested mutation succeeded
 #   10  check only: every stale patch is clean, so `apply` will succeed
@@ -43,7 +46,7 @@
 
 set -euo pipefail
 
-usage() { sed -n '7,35p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 1; }
+usage() { sed -n '7,38p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 1; }
 
 mode="${1:-}"
 [[ "$mode" =~ ^(check|apply|assemble)$ ]] || usage
@@ -116,6 +119,59 @@ if [[ $fetch -eq 1 ]]; then
   jj git fetch --remote origin --quiet
   jj git fetch --remote upstream --quiet
 fi
+# origin_commit prints the commit origin has for a bookmark, or nothing when it lacks it.
+origin_commit() {
+  jj log --no-graph --color=never -r "remote_bookmarks(exact:\"$1\", remote=exact:\"origin\")" -T 'commit_id ++ "\n"' 2>/dev/null | head -n1
+}
+
+# on_origin succeeds when a commit is reachable from some ref on origin.
+on_origin() { [[ -n "$(git for-each-ref --count=1 --contains "$1" refs/remotes/origin)" ]]; }
+
+# reconcile_bookmarks makes the local bookmarks in the fork's namespaces agree with origin.
+# Orb snapshots carry stale local bookmarks, and Amp updates them with plain `git fetch`, so a
+# bookmark may be behind, conflicted, restacked, or deleted on origin. Nothing on origin is
+# ever deleted or rewritten. Rules:
+#   1 origin has it and local is behind: move local to origin's commit
+#   2 origin has it and the local bookmark is conflicted: set it to origin's commit
+#   3 origin has it and local is ahead or diverged: keep local (unpushed work) and report it
+#   3b diverged, but the local commit is reachable from some origin ref: take origin's commit
+#   4 origin lacks it but the local commit is reachable from some origin ref: it was published
+#     and deleted, so forget the local bookmark
+#   5 origin lacks it and the commit is on no origin ref: new local work, keep it
+reconcile_bookmarks() {
+  local name o l
+  local -a names locals
+  mapfile -t names < <(jj bookmark list --color=never 'exact:main' 'exact:fork/main' 'glob:patch/*' \
+    'glob:tooling/*' 'glob:glue/*' -T 'if(!remote && present, name ++ "\n")' 2>/dev/null | sort -u)
+  for name in "${names[@]}"; do
+    mapfile -t locals < <(jj log --no-graph --color=never -r "bookmarks(exact:\"$name\")" -T 'commit_id ++ "\n"')
+    [[ ${#locals[@]} -gt 0 ]] || continue
+    o="$(origin_commit "$name")"
+    l="${locals[0]}"
+    if [[ -z "$o" ]]; then
+      for l in "${locals[@]}"; do on_origin "$l" || continue 2; done
+      jj bookmark delete "$name" --quiet
+      report "reconciled: $name forgotten, ${locals[0]:0:12} is on origin but the bookmark was deleted there (rule 4)"
+    elif [[ ${#locals[@]} -gt 1 ]]; then
+      jj bookmark set "$name" -r "$o" --allow-backwards --quiet
+      report "reconciled: $name conflicted -> ${o:0:12} (rule 2)"
+    elif [[ "$l" == "$o" ]]; then
+      continue
+    elif git merge-base --is-ancestor "$l" "$o"; then
+      jj bookmark set "$name" -r "$o" --allow-backwards --quiet
+      report "reconciled: $name ${l:0:12} -> ${o:0:12} (rule 1)"
+    elif git merge-base --is-ancestor "$o" "$l"; then
+      report "reconciled: $name kept at ${l:0:12}, ahead of origin ${o:0:12} (rule 3)"
+    elif on_origin "$l"; then
+      jj bookmark set "$name" -r "$o" --allow-backwards --quiet
+      report "reconciled: $name ${l:0:12} -> ${o:0:12}, local commit already on origin (rule 3b)"
+    else
+      report "reconciled: $name kept at ${l:0:12}, diverged from origin ${o:0:12} with unpublished commits (rule 3)"
+    fi
+  done
+}
+reconcile_bookmarks
+
 # Track series and glues that other threads pushed, even where the repo config predates
 # auto-tracking, so fork_parents() includes them.
 jj bookmark track 'patch/*' 'tooling/*' 'glue/*' --remote origin >/dev/null 2>&1
@@ -468,7 +524,7 @@ conflicting_pairs() {
 # to push if fork/main or any patch/*, tooling/*, or glue/* bookmark changed on origin since
 # the run started: pushing would drop that work from fork/main. Returns 20 in that case.
 push_bookmarks() {
-  local args=(-b fork/main) name changed
+  local args=() name changed
   jj git fetch --remote origin --quiet
   changed="$({ diff <(printf '%s\n' "$origin_snapshot") <(origin_refs) || true; } |
     sed -n 's/^[<>] \([^ ]*\) .*/\1/p' | sort -u)"
@@ -478,7 +534,18 @@ push_bookmarks() {
     report "rerun: fork-update assemble --push"
     return 20
   fi
-  for name in "${patches[@]}" "${glues[@]}"; do args+=(-b "$name"); done
+  # Never push backwards: skip a bookmark whose commit is a strict ancestor of origin's.
+  for name in "${patches[@]}" "${glues[@]}" fork/main; do
+    local o l
+    o="$(origin_commit "$name")"
+    l="$(rev "bookmarks(exact:\"$name\")")"
+    if [[ -n "$o" && "$l" != "$o" ]] && git merge-base --is-ancestor "$l" "$o"; then
+      report "not pushing $name: ${l:0:12} is behind origin ${o:0:12}"
+    else
+      args+=(-b "$name")
+    fi
+  done
+  # main mirrors upstream, so it only fast-forwards.
   if git merge-base --is-ancestor "$(rev 'main@origin')" "$(rev main)"; then args+=(-b main); fi
   progress "pushing ${args[*]}"
   jj git push --remote origin "${args[@]}"
