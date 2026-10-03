@@ -7,11 +7,14 @@ package metrics
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -55,6 +58,40 @@ const (
 	// MCP backend attribute, which identifies the upstream MCP backend that handled the request.
 	mcpAttributeBackend = "mcp.backend"
 )
+
+// OpenTelemetry MCP semantic convention metrics (semantic-conventions-genai
+// docs/gen-ai/mcp.md). These are separate from, and do not change, the legacy
+// series above.
+const (
+	// mcpClientOperationDuration records the duration of an MCP request or
+	// notification as observed by the sender, until the response or ack.
+	mcpClientOperationDuration = "mcp.client.operation.duration"
+	// mcpServerOperationDuration records the duration as observed by the
+	// receiver, from receipt until the result or ack is sent.
+	mcpServerOperationDuration = "mcp.server.operation.duration"
+
+	mcpAttributeToolName          = "gen_ai.tool.name"
+	mcpAttributePromptName        = "gen_ai.prompt.name"
+	mcpAttributeResponseStatus    = "rpc.response.status_code"
+	mcpToolErrorType              = "tool_error"
+	mcpOperationErrorTypeFallback = "_OTHER"
+)
+
+// mcpOperationBuckets are the bucket boundaries recommended by the convention.
+var mcpOperationBuckets = []float64{0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 30, 60, 120, 300}
+
+// MCPOperationMetrics records the OpenTelemetry MCP operation duration metrics.
+// It is a separate interface so existing MCPMetrics implementations are
+// unaffected; the value returned by [NewMCP] implements both.
+type MCPOperationMetrics interface {
+	// RecordClientOperationDuration records mcp.client.operation.duration for a
+	// request the gateway sent (for example to a backend MCP server). opErr is
+	// nil on success.
+	RecordClientOperationDuration(ctx context.Context, startAt time.Time, method string, params mcpsdk.Params, opErr error)
+	// RecordServerOperationDuration records mcp.server.operation.duration for a
+	// request the gateway received (for example from an MCP client) and answered.
+	RecordServerOperationDuration(ctx context.Context, startAt time.Time, method string, params mcpsdk.Params, opErr error)
+}
 
 // MCPErrorType defines the type of error that occurred during an MCP request.
 type MCPErrorType string
@@ -135,6 +172,8 @@ type MCPMetrics interface {
 
 type mcp struct {
 	requestDuration               metric.Float64Histogram
+	clientOperationDuration       metric.Float64Histogram
+	serverOperationDuration       metric.Float64Histogram
 	methodCount                   metric.Float64Counter
 	initializationDuration        metric.Float64Histogram
 	capabilitiesNegotiated        metric.Float64Counter
@@ -147,6 +186,16 @@ type mcp struct {
 func NewMCP(meter metric.Meter, requestHeaderAttributeMapping map[string]string) MCPMetrics {
 	return &mcp{
 		requestHeaderAttributeMapping: requestHeaderAttributeMapping,
+		clientOperationDuration: mustRegisterHistogram(meter,
+			mcpClientOperationDuration,
+			metric.WithDescription("Duration of the MCP request or notification as observed on the sender"),
+			metric.WithUnit("s"),
+			metric.WithExplicitBucketBoundaries(mcpOperationBuckets...)),
+		serverOperationDuration: mustRegisterHistogram(meter,
+			mcpServerOperationDuration,
+			metric.WithDescription("Duration of the MCP request or notification as observed on the receiver"),
+			metric.WithUnit("s"),
+			metric.WithExplicitBucketBoundaries(mcpOperationBuckets...)),
 		requestDuration: mustRegisterHistogram(meter,
 			mcpRequestDuration,
 			metric.WithDescription("Duration of MCP requests"),
@@ -179,6 +228,8 @@ func NewMCP(meter metric.Meter, requestHeaderAttributeMapping map[string]string)
 func (m *mcp) WithBackend(backend string) MCPMetrics {
 	withBackend := &mcp{
 		requestDuration:               m.requestDuration,
+		clientOperationDuration:       m.clientOperationDuration,
+		serverOperationDuration:       m.serverOperationDuration,
 		methodCount:                   m.methodCount,
 		initializationDuration:        m.initializationDuration,
 		capabilitiesNegotiated:        m.capabilitiesNegotiated,
@@ -197,6 +248,8 @@ func (m *mcp) WithBackend(backend string) MCPMetrics {
 func (m *mcp) WithRequestAttributes(req *http.Request) MCPMetrics {
 	withAttrs := &mcp{
 		requestDuration:               m.requestDuration,
+		clientOperationDuration:       m.clientOperationDuration,
+		serverOperationDuration:       m.serverOperationDuration,
 		methodCount:                   m.methodCount,
 		initializationDuration:        m.initializationDuration,
 		capabilitiesNegotiated:        m.capabilitiesNegotiated,
@@ -214,6 +267,58 @@ func (m *mcp) WithRequestAttributes(req *http.Request) MCPMetrics {
 	}
 
 	return withAttrs
+}
+
+var _ MCPOperationMetrics = (*mcp)(nil)
+
+// RecordClientOperationDuration implements [MCPOperationMetrics.RecordClientOperationDuration].
+func (m *mcp) RecordClientOperationDuration(ctx context.Context, startAt time.Time, method string, params mcpsdk.Params, opErr error) {
+	if method == "" {
+		return
+	}
+	m.clientOperationDuration.Record(ctx, time.Since(startAt).Seconds(), operationAttributes(method, params, opErr))
+}
+
+// RecordServerOperationDuration implements [MCPOperationMetrics.RecordServerOperationDuration].
+func (m *mcp) RecordServerOperationDuration(ctx context.Context, startAt time.Time, method string, params mcpsdk.Params, opErr error) {
+	if method == "" {
+		return
+	}
+	m.serverOperationDuration.Record(ctx, time.Since(startAt).Seconds(), operationAttributes(method, params, opErr))
+}
+
+// operationAttributes builds only convention-defined, low-cardinality
+// attributes. Gateway-specific attributes (backend, header mappings) are
+// deliberately excluded. A JSON-RPC error sets error.type and
+// rpc.response.status_code to the code; any other error is "_OTHER".
+func operationAttributes(method string, params mcpsdk.Params, opErr error) metric.MeasurementOption {
+	attrs := []attribute.KeyValue{attribute.String(mcpAttributeMethodName, method)}
+	switch p := params.(type) {
+	case *mcpsdk.CallToolParams:
+		if p != nil && p.Name != "" {
+			attrs = append(attrs, attribute.String(mcpAttributeToolName, p.Name))
+		}
+	case *mcpsdk.GetPromptParams:
+		if p != nil && p.Name != "" {
+			attrs = append(attrs, attribute.String(mcpAttributePromptName, p.Name))
+		}
+	}
+	if opErr != nil {
+		var toolErr interface{ IsMCPToolError() bool }
+		var rpcErr *jsonrpc.Error
+		switch {
+		case errors.As(opErr, &toolErr) && toolErr.IsMCPToolError():
+			attrs = append(attrs, attribute.String(mcpAttributeErrorType, mcpToolErrorType))
+		case errors.As(opErr, &rpcErr):
+			code := strconv.FormatInt(rpcErr.Code, 10)
+			attrs = append(attrs,
+				attribute.String(mcpAttributeErrorType, code),
+				attribute.String(mcpAttributeResponseStatus, code))
+		default:
+			attrs = append(attrs, attribute.String(mcpAttributeErrorType, mcpOperationErrorTypeFallback))
+		}
+	}
+	return metric.WithAttributes(attrs...)
 }
 
 // RecordMethodCount implements [MCPMetrics.RecordMethodCount].
