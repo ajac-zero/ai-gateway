@@ -6,14 +6,17 @@
 package metrics
 
 import (
+	"errors"
 	"net/http"
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/envoyproxy/ai-gateway/internal/testing/testotel"
 )
@@ -273,4 +276,64 @@ func TestWithBackendAndRequestAttributes(t *testing.T) {
 		))
 	require.Equal(t, uint64(1), count)
 	require.Equal(t, 20, int(sum))
+}
+
+func TestMCPOperationDuration(t *testing.T) {
+	mr := metric.NewManualReader()
+	meter := metric.NewMeterProvider(metric.WithReader(mr)).Meter("test")
+	m := NewMCP(meter, map[string]string{"x-user": "user"}).WithBackend("b1")
+	ops, ok := m.(MCPOperationMetrics)
+	require.True(t, ok)
+
+	startAt := time.Now().Add(-time.Minute)
+	ops.RecordClientOperationDuration(t.Context(), startAt, "tools/call", &mcpsdk.CallToolParams{Name: "t1"}, nil)
+	ops.RecordClientOperationDuration(t.Context(), startAt, "prompts/get", &mcpsdk.GetPromptParams{Name: "p1"},
+		&jsonrpc.Error{Code: -32602, Message: "bad"})
+	ops.RecordServerOperationDuration(t.Context(), startAt, "tools/list", &mcpsdk.ListToolsParams{}, errors.New("boom"))
+	ops.RecordServerOperationDuration(t.Context(), startAt, "", nil, nil) // ignored
+
+	count, sum := testotel.GetHistogramValues(t, mr, mcpClientOperationDuration, attribute.NewSet(
+		attribute.String("mcp.method.name", "tools/call"), attribute.String("gen_ai.tool.name", "t1")))
+	require.Equal(t, uint64(1), count)
+	require.Equal(t, 60, int(sum))
+
+	count, _ = testotel.GetHistogramValues(t, mr, mcpClientOperationDuration, attribute.NewSet(
+		attribute.String("mcp.method.name", "prompts/get"), attribute.String("gen_ai.prompt.name", "p1"),
+		attribute.String("error.type", "-32602"), attribute.String("rpc.response.status_code", "-32602")))
+	require.Equal(t, uint64(1), count)
+
+	count, sum = testotel.GetHistogramValues(t, mr, mcpServerOperationDuration, attribute.NewSet(
+		attribute.String("mcp.method.name", "tools/list"), attribute.String("error.type", "_OTHER")))
+	require.Equal(t, uint64(1), count)
+	require.Equal(t, 60, int(sum))
+
+	// Legacy series untouched by operation recording.
+	rm := metricdata.ResourceMetrics{}
+	require.NoError(t, mr.Collect(t.Context(), &rm))
+	for _, sm := range rm.ScopeMetrics {
+		for _, mm := range sm.Metrics {
+			require.NotEqual(t, mcpRequestDuration, mm.Name)
+		}
+	}
+}
+
+type mcpToolErrorForTest struct{}
+
+func (mcpToolErrorForTest) Error() string        { return "sensitive tool output" }
+func (mcpToolErrorForTest) IsMCPToolError() bool { return true }
+
+func TestMCPOperationDuration_ToolErrorType(t *testing.T) {
+	mr := metric.NewManualReader()
+	meter := metric.NewMeterProvider(metric.WithReader(mr)).Meter("test")
+	ops, ok := NewMCP(meter, nil).(MCPOperationMetrics)
+	require.True(t, ok)
+	ops.RecordClientOperationDuration(t.Context(), time.Now().Add(-time.Second), "tools/call",
+		&mcpsdk.CallToolParams{Name: "t1"}, mcpToolErrorForTest{})
+
+	count, _ := testotel.GetHistogramValues(t, mr, mcpClientOperationDuration, attribute.NewSet(
+		attribute.String("mcp.method.name", "tools/call"),
+		attribute.String("gen_ai.tool.name", "t1"),
+		attribute.String("error.type", "tool_error"),
+	))
+	require.Equal(t, uint64(1), count)
 }

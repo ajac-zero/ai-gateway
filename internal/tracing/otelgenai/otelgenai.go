@@ -35,16 +35,23 @@ const (
 	RequestSeed             = "gen_ai.request.seed"
 	RequestChoiceCount      = "gen_ai.request.choice.count"
 	RequestEncodingFormats  = "gen_ai.request.encoding_formats"
+	RequestStream           = "gen_ai.request.stream"
+	// RequestReasoningLevel and RequestPreviousResponseID are defined in
+	// semantic-conventions-genai but not yet in the pinned semconv package, so
+	// they are not covered by semconv_vocabulary_test.go.
+	RequestReasoningLevel     = "gen_ai.request.reasoning.level"
+	RequestPreviousResponseID = "gen_ai.request.previous_response.id"
+	OutputType                = "gen_ai.output.type"
 
 	ResponseID            = "gen_ai.response.id"
 	ResponseModel         = "gen_ai.response.model"
 	ResponseFinishReasons = "gen_ai.response.finish_reasons"
 
-	UsageInputTokens              = "gen_ai.usage.input_tokens"                //nolint:gosec // attribute name, not credential
-	UsageOutputTokens             = "gen_ai.usage.output_tokens"               //nolint:gosec // attribute name, not credential
-	UsageCacheReadInputTokens     = "gen_ai.usage.cache_read.input_tokens"     //nolint:gosec // attribute name, not credential
-	UsageCacheCreationInputTokens = "gen_ai.usage.cache_creation.input_tokens" //nolint:gosec // attribute name, not credential
-	UsageReasoningOutputTokens    = "gen_ai.usage.reasoning.output_tokens"     //nolint:gosec // attribute name, not credential
+	UsageInputTokens           = "gen_ai.usage.input_tokens"             //nolint:gosec // attribute name, not credential
+	UsageOutputTokens          = "gen_ai.usage.output_tokens"            //nolint:gosec // attribute name, not credential
+	UsageCacheReadInputTokens  = "gen_ai.usage.cache_read.input_tokens"  //nolint:gosec // attribute name, not credential
+	UsageCacheWriteInputTokens = "gen_ai.usage.cache_write.input_tokens" //nolint:gosec // attribute name, not credential
+	UsageReasoningOutputTokens = "gen_ai.usage.reasoning.output_tokens"  //nolint:gosec // attribute name, not credential
 
 	// The four message attributes below carry conversation content and are only
 	// emitted when capture is explicitly enabled. See config.go.
@@ -95,18 +102,26 @@ const (
 )
 
 // Provider is the value of the ProviderName attribute.
+// Output types, the values of OutputType.
+const (
+	OutputTypeText   = "text"
+	OutputTypeJSON   = "json"
+	OutputTypeImage  = "image"
+	OutputTypeSpeech = "speech"
+)
+
 type Provider string
 
-// Providers recognized by the GenAI registry.
+// Providers recognized by the GenAI registry. The Azure OpenAI value is
+// "azure.ai.openai" in the current registry (formerly "azure.openai").
+// typesafe has no registry member and is a custom value, which the registry permits.
 // See: https://opentelemetry.io/docs/specs/semconv/attributes-registry/gen-ai/
 const (
-	ProviderOpenAI       Provider = "openai"
-	ProviderAzureOpenAI  Provider = "azure.openai"
-	ProviderAWSBedrock   Provider = "aws.bedrock"
-	ProviderAWSAnthropic Provider = "aws.anthropic"
-	ProviderGCPVertexAI  Provider = "gcp.vertex_ai"
-	ProviderGCPAnthropic Provider = "gcp.anthropic"
-	ProviderAnthropic    Provider = "anthropic"
-	ProviderCohere       Provider = "cohere"
-	ProviderTypeSafe     Provider = "typesafe"
+	ProviderOpenAI      Provider = "openai"
+	ProviderAzureOpenAI Provider = "azure.ai.openai"
+	ProviderAWSBedrock  Provider = "aws.bedrock"
+	ProviderGCPVertexAI Provider = "gcp.vertex_ai"
+	ProviderAnthropic   Provider = "anthropic"
+	ProviderCohere      Provider = "cohere"
+	ProviderTypeSafe    Provider = "typesafe"
 )

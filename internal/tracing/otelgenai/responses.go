@@ -21,6 +21,9 @@ func responsesRequestAttrs(req *openai.ResponseRequest) []attribute.KeyValue {
 	p.float64(RequestTemperature, req.Temperature)
 	p.float64(RequestTopP, req.TopP)
 	p.int64(RequestMaxTokens, req.MaxOutputTokens)
+	p.stream(req.Stream)
+	p.str(RequestReasoningLevel, req.Reasoning.Effort)
+	p.str(RequestPreviousResponseID, req.PreviousResponseID)
 	return p.attrs
 }
 
@@ -33,6 +36,16 @@ func responsesResponseAttrs(resp *openai.Response) []attribute.KeyValue {
 			int(u.OutputTokensDetails.ReasoningTokens))...)
 	}
 	return attrs
+}
+
+func responsesResponseError(resp *openai.Response) (string, string) {
+	if resp.Status != "failed" {
+		return "", ""
+	}
+	if resp.Error.Code == "" {
+		return "_OTHER", resp.Error.Message
+	}
+	return resp.Error.Code, resp.Error.Message
 }
 
 // responsesConversationID reads the conversation this request continues.
@@ -100,4 +113,24 @@ func responsesContentParts(content *openai.ResponseOutputMessageContentUnion) []
 		}
 	}
 	return parts
+}
+
+// responsesFoldChunks returns the final response carried by a terminal stream
+// event (completed, incomplete or failed), so streaming and unary responses
+// are recorded identically. Without a terminal event there is nothing reliable
+// to report.
+func responsesFoldChunks(chunks []*openai.ResponseStreamEventUnion) *openai.Response {
+	for i := len(chunks) - 1; i >= 0; i-- {
+		c := chunks[i]
+		switch {
+		case c == nil:
+		case c.OfResponseCompleted != nil:
+			return &c.OfResponseCompleted.Response
+		case c.OfResponseIncomplete != nil:
+			return &c.OfResponseIncomplete.Response
+		case c.OfResponseFailed != nil:
+			return &c.OfResponseFailed.Response
+		}
+	}
+	return &openai.Response{}
 }

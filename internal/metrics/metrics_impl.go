@@ -61,6 +61,7 @@ type metricsImpl struct {
 	timeToFirstToken     time.Duration // Duration to first token.
 	interTokenLatencySec float64       // Average time per token after first, in seconds.
 	totalOutputTokens    uint32
+	lastChunkTime        time.Time // Time of the previous streaming chunk, for time_per_output_chunk.
 }
 
 // StartRequest initializes timing for a new request.
@@ -138,9 +139,31 @@ func (b *metricsImpl) buildBaseAttributes(headers map[string]string) attribute.S
 	return attribute.NewSet(attrs...)
 }
 
+// buildClientAttributes builds the attribute set for the current semconv client metrics. The legacy gateway-specific
+// attributes (original model, backend, header mappings) are intentionally omitted.
+func (b *metricsImpl) buildClientAttributes(withResponseModel bool) []attribute.KeyValue {
+	attrs := []attribute.KeyValue{
+		attribute.Key(genaiAttributeOperationName).String(normalizeClientOperation(b.operation)),
+		attribute.Key(genaiAttributeProviderName).String(normalizeClientProvider(b.backend)),
+	}
+	if b.requestModel != "unknown" && b.requestModel != "" {
+		attrs = append(attrs, attribute.Key(genaiAttributeRequestModel).String(b.requestModel))
+	}
+	if withResponseModel && b.responseModel != "unknown" && b.responseModel != "" {
+		attrs = append(attrs, attribute.Key(genaiAttributeResponseModel).String(b.responseModel))
+	}
+	return attrs
+}
+
 // RecordRequestCompletion records the completion of a request with success/failure status.
 func (b *metricsImpl) RecordRequestCompletion(ctx context.Context, success bool, requestHeaders map[string]string) {
 	attrs := b.buildBaseAttributes(requestHeaders)
+
+	clientAttrs := b.buildClientAttributes(true)
+	if !success {
+		clientAttrs = append(clientAttrs, attribute.Key(genaiAttributeErrorType).String(genaiErrorTypeFallback))
+	}
+	b.metrics.clientOperationDuration.Record(ctx, time.Since(b.requestStart).Seconds(), metric.WithAttributes(clientAttrs...))
 
 	if success {
 		// According to the semantic conventions, the error attribute should not be added for successful operations.
@@ -158,6 +181,7 @@ func (b *metricsImpl) RecordRequestCompletion(ctx context.Context, success bool,
 // RecordTokenUsage records token usage metrics.
 func (b *metricsImpl) RecordTokenUsage(ctx context.Context, usage TokenUsage, requestHeaders map[string]string) {
 	attrs := b.buildBaseAttributes(requestHeaders)
+	b.recordClientTokenUsage(ctx, usage)
 
 	if inputTokens, ok := usage.InputTokens(); ok {
 		b.metrics.tokenUsage.Record(ctx, float64(inputTokens),
@@ -207,12 +231,20 @@ func (b *metricsImpl) RecordTokenLatency(ctx context.Context, tokens uint32, end
 
 	// Record time to first token on the first call for streaming responses.
 	// This ensures we capture the metric even when token counts aren't available in streaming chunks.
+	now := time.Now()
+	clientAttrs := metric.WithAttributes(b.buildClientAttributes(true)...)
 	if !b.firstTokenSent {
 		b.firstTokenSent = true
 		b.timeToFirstToken = time.Since(b.requestStart)
+		b.lastChunkTime = now
+		b.metrics.clientTimeToFirstChunk.Record(ctx, b.timeToFirstToken.Seconds(), clientAttrs)
 		b.metrics.firstTokenLatency.Record(ctx, b.timeToFirstToken.Seconds(), metric.WithAttributeSet(attrs))
 		return
 	}
+
+	// Every chunk after the first: time since the previous chunk was processed by extproc.
+	b.metrics.clientTimePerOutputChunk.Record(ctx, now.Sub(b.lastChunkTime).Seconds(), clientAttrs)
+	b.lastChunkTime = now
 
 	// Track max cumulative tokens across the stream.
 	if tokens > b.totalOutputTokens {
@@ -229,5 +261,34 @@ func (b *metricsImpl) RecordTokenLatency(ctx context.Context, tokens uint32, end
 		// Divide by (total_tokens - 1) as per spec, not by tokens after first chunk.
 		b.interTokenLatencySec = timeSinceFirstToken.Seconds() / float64(b.totalOutputTokens-1)
 		b.metrics.outputTokenLatency.Record(ctx, b.interTokenLatencySec, metric.WithAttributeSet(attrs))
+	}
+}
+
+// recordClientTokenUsage records the current semconv inference token metrics. The provider APIs used here do not
+// break usage down by modality, so the spec-mandated `unknown` modality is reported on the usage counters.
+func (b *metricsImpl) recordClientTokenUsage(ctx context.Context, usage TokenUsage) {
+	if !operationReportsTokens(b.operation) {
+		return
+	}
+	base := b.buildClientAttributes(true)
+	withModality := metric.WithAttributes(append(base[:len(base):len(base)],
+		attribute.Key(genaiAttributeTokenModality).String(genaiTokenModalityUnknown))...)
+	perOp := metric.WithAttributes(base...)
+	if v, ok := usage.InputTokens(); ok {
+		b.metrics.clientInputTokens.Add(ctx, int64(v), withModality)
+		b.metrics.clientOperationInputToks.Record(ctx, float64(v), perOp)
+	}
+	if v, ok := usage.OutputTokens(); ok {
+		b.metrics.clientOutputTokens.Add(ctx, int64(v), withModality)
+		b.metrics.clientOperationOutputToks.Record(ctx, float64(v), perOp)
+	}
+	if v, ok := usage.CachedInputTokens(); ok {
+		b.metrics.clientCacheReadTokens.Add(ctx, int64(v), withModality)
+	}
+	if v, ok := usage.CacheCreationInputTokens(); ok {
+		b.metrics.clientCacheWriteTokens.Add(ctx, int64(v), withModality)
+	}
+	if v, ok := usage.ReasoningTokens(); ok {
+		b.metrics.clientReasoningTokens.Add(ctx, int64(v), withModality)
 	}
 }

@@ -914,7 +914,9 @@ func TestHandleToolCallRequest_ToolResultWithIsError(t *testing.T) {
 	}))
 	t.Cleanup(backendServer.Close)
 
+	rec := &opRecorder{}
 	proxy := newTestMCPProxy()
+	proxy.metrics = opMetrics{rec: rec}
 	proxy.backendListenerAddr = backendServer.URL
 	s := &session{
 		reqCtx: proxy,
@@ -938,6 +940,12 @@ func TestHandleToolCallRequest_ToolResultWithIsError(t *testing.T) {
 	// An error is returned for proper metrics tracking, but it's treated as an application-level
 	// error (not a span exception) since the protocol worked correctly and the LLM needs to see these errors.
 	require.Error(t, err)
+	require.Len(t, rec.ops, 1)
+	require.Equal(t, "client", rec.ops[0].side)
+	require.Equal(t, "tools/call", rec.ops[0].method)
+	var metricToolErr interface{ IsMCPToolError() bool }
+	require.ErrorAs(t, rec.ops[0].err, &metricToolErr)
+	require.True(t, metricToolErr.IsMCPToolError())
 
 	// Verify it's a structured errToolCall with the expected details
 	var toolErr *errToolCall
@@ -951,6 +959,33 @@ func TestHandleToolCallRequest_ToolResultWithIsError(t *testing.T) {
 
 	// Verify the response contains the error message
 	require.Contains(t, rr.Body.String(), "missing required parameter: owner")
+}
+
+func TestRecordToolCallResult_OnlySuccessfulResults(t *testing.T) {
+	success := &jsonrpc.Response{Result: []byte(`{"isError":false,"content":[]}`)}
+	cases := []struct {
+		name string
+		req  *jsonrpc.Request
+		msg  *jsonrpc.Response
+		want bool
+	}{
+		{name: "successful tool call", req: &jsonrpc.Request{Method: "tools/call"}, msg: success, want: true},
+		{name: "tool execution error", req: &jsonrpc.Request{Method: "tools/call"}, msg: &jsonrpc.Response{Result: []byte(`{"isError":true,"content":[]}`)}},
+		{name: "jsonrpc error", req: &jsonrpc.Request{Method: "tools/call"}, msg: &jsonrpc.Response{Error: &jsonrpc.Error{Code: -32603, Message: "failed"}}},
+		{name: "other operation", req: &jsonrpc.Request{Method: "tools/list"}, msg: success},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			span := &fakeSpan{}
+			recordToolCallResult(span, tc.req, tc.msg)
+			if tc.want {
+				require.Equal(t, []byte(tc.msg.Result), span.toolCallResult)
+			} else {
+				require.Empty(t, span.toolCallResult)
+			}
+		})
+	}
 }
 
 func TestProxyResponseBody_JSONResponse(t *testing.T) {
