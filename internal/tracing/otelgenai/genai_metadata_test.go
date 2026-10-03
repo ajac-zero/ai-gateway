@@ -11,11 +11,11 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
 	otelcodes "go.opentelemetry.io/otel/codes"
+	oteltrace "go.opentelemetry.io/otel/trace"
 
 	anthropicschema "github.com/envoyproxy/ai-gateway/internal/apischema/anthropic"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
 	"github.com/envoyproxy/ai-gateway/internal/testing/testotel"
-	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 // TestRequestMetadata covers streaming, output type and reasoning metadata per
@@ -161,7 +161,7 @@ func TestResponsesFailedResponseRecordsError(t *testing.T) {
 		})
 
 		require.Equal(t, otelcodes.Error, unary.Status.Code)
-		require.Equal(t, "provider failure detail" == unary.Status.Description, capture)
+		require.Equal(t, capture, unary.Status.Description == "provider failure detail")
 		require.Contains(t, unary.Attributes, attribute.String(ErrorType, "server_error"))
 		testotel.RequireAttributesEqual(t, unary.Attributes, stream.Attributes)
 		require.Equal(t, unary.Status, stream.Status)
