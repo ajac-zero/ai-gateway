@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Copyright Envoy AI Gateway Authors
+# SPDX-License-Identifier: Apache-2.0
+# The full text of the Apache license is available in the LICENSE file at
+# the root of the repo.
+
+# Prepares a clone of the fork for the jj patch workflow. Idempotent.
+#
+# - Colocates a jj repository with the existing Git checkout.
+# - Adds the upstream remote and fetches upstream and origin.
+# - Tracks main, fork/main, and every patch/*, tooling/*, and glue/* bookmark on origin.
+# - Installs the versioned jj repo config (trunk(), fork_*() revsets, fork-* aliases).
+
+set -euo pipefail
+
+UPSTREAM_URL="${FORK_UPSTREAM_URL:-https://github.com/envoyproxy/ai-gateway.git}"
+
+repo_root="$(git rev-parse --show-toplevel)"
+skill_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+# Fetch every origin branch, even from a single-branch clone, so all patch/* bookmarks appear.
+git config --replace-all remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+
+# Amp orbs clone shallowly. jj records the shallow boundary as a root-parented commit,
+# which hides fork/main's real parents, so fetch full history and rebuild jj's view.
+if [[ "$(git rev-parse --is-shallow-repository)" == true ]]; then
+  echo "fork-bootstrap: unshallowing the clone"
+  git fetch --quiet --unshallow origin
+  rm -rf .jj
+fi
+
+if [[ ! -d .jj ]]; then
+  echo "fork-bootstrap: colocating jj with the Git checkout"
+  jj git init --colocate
+fi
+
+if ! git remote get-url upstream >/dev/null 2>&1; then
+  git remote add upstream "$UPSTREAM_URL"
+fi
+
+jj git fetch --remote origin --quiet
+jj git fetch --remote upstream --quiet
+
+# Install the config after fetching so trunk() resolves.
+config_path="$(jj config path --repo)"
+mkdir -p "$(dirname "$config_path")"
+cp "$skill_dir/jj-repo-config.toml" "$config_path"
+
+# Track the fork's bookmarks so local bookmarks follow origin.
+jj bookmark track main fork/main 'patch/*' 'tooling/*' 'glue/*' --remote origin >/dev/null 2>&1 || true
+
+echo "fork-bootstrap: trunk is $(jj log -r 'trunk()' --no-graph -T 'commit_id.short()')," \
+  "$(jj log -r 'fork_patches()' --no-graph -T '"x"' | wc -c | tr -d ' ') series and" \
+  "$(jj log -r 'fork_glue()' --no-graph -T '"x"' | wc -c | tr -d ' ') glues tracked"

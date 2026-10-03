@@ -357,6 +357,12 @@ func Main(ctx context.Context, args []string, stderr io.Writer) (err error) {
 	server.Register(path.Join(flags.rootPrefix, endpointPrefixes.Anthropic, "/v1/messages/count_tokens"), extproc.NewFactory(
 		countTokensMetricsFactory, tracing.CountTokensTracer(), endpointspec.MessagesCountTokensEndpointSpec{}))
 
+	generateContentMetricsFactory := metrics.NewMetricsFactory(meter, metricsRequestHeaderAttributes, metrics.GenAIOperationGenerateContent)
+	// IMPORTANT: do NOT use path.Join for the trailing "/models/" segment —
+	// path.Join would strip the trailing slash needed to prevent prefix collisions.
+	geminiModelPrefix := strings.TrimRight(path.Join(flags.rootPrefix, endpointPrefixes.Gemini), "/") + "/models/"
+	server.RegisterPrefix(geminiModelPrefix, extproc.NewGeminiProcessorFactory(generateContentMetricsFactory))
+
 	// Create and register gRPC server with ExternalProcessorServer (the service Envoy calls).
 	if err = filterapi.StartConfigBundleWatcher(ctx, flags.configBundlePath, server, l, time.Second*5); err != nil {
 		return fmt.Errorf("failed to start config watcher: %w", err)

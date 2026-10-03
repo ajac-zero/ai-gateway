@@ -1,0 +1,760 @@
+#!/usr/bin/env bash
+# Copyright Envoy AI Gateway Authors
+# SPDX-License-Identifier: Apache-2.0
+# The full text of the Apache license is available in the LICENSE file at
+# the root of the repo.
+
+# Keeps the fork's patches and fork/main current with upstream.
+#
+# Usage: fork-update <check|apply|assemble> [--target REV] [--candidate REV] [--no-fetch]
+#                    [--no-tests] [--push]
+#
+#   check     Read-only. Replays every stale patch onto the target in a throwaway Git
+#             worktree, then builds, vets, and tests the packages the patch touches.
+#   apply     Runs check. If every stale patch is clean, rebases the patches with jj onto
+#             the target, fast-forwards main, and assembles fork/main. Never mutates
+#             anything when a patch needs an agent.
+#   assemble  Restacks every glue/* onto the current tips of the series it merges, then
+#             builds a fresh fork/main merge of fork_parents() and checks it. Moves
+#             fork/main only when the merge is conflict-free and every check passes.
+#
+# "Patches" here are the series rooted at trunk(): patch/* (upstreamable features) and
+# tooling/* (fork-only tooling). A glue/<a>+<b> bookmark is a merge of the series a and b
+# that holds only the resolution of their conflicts.
+#
+#   --target REV  Upstream revision to update to (default: main@upstream after fetching).
+#   --candidate REV
+#                 assemble only: check and publish an existing merge, such as one whose
+#                 integration conflicts an agent resolved, instead of creating a new merge.
+#                 Its parents must be exactly fork_parents().
+#   --no-fetch    Do not fetch origin and upstream first.
+#   --no-tests    Skip go build/vet/test (conflict detection only).
+#   --push        After a successful apply or assemble, push main, the patch/*, tooling/*,
+#                 and glue/* bookmarks, and fork/main to origin, naming each bookmark
+#                 explicitly. Fetches origin first and refuses (exit 20) if any of those
+#                 bookmarks changed on origin since this run started.
+#
+# After fetching, the running script must match the copy in tooling/agent-workflow on origin or
+# in the local bookmark; otherwise it exits 1, since a stale script may not know every series.
+# FORK_UPDATE_ALLOW_STALE_SCRIPT=1 overrides this for debugging. Before moving or pushing
+# fork/main, every patch/*, tooling/*, and glue/* bookmark on origin must be merged into it or
+# deliberately deleted in this clone, or the run exits 20 naming each one.
+#
+# Before anything else, every local main, fork/main, patch/*, tooling/*, and glue/* bookmark is
+# reconciled against origin (see reconcile_bookmarks), since orb snapshots carry stale ones.
+#
+# Report lines go to stdout; progress goes to stderr. Exit codes:
+#   0   nothing to do, or the requested mutation succeeded
+#   10  check only: every stale patch is clean, so `apply` will succeed
+#   20  a patch conflicts with or breaks on the target, or fork/main cannot be assembled;
+#       an agent must fix it (see "Agent fixes" in the skill)
+#   1   usage or environment error
+
+set -euo pipefail
+
+usage() { sed -n '7,51p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 1; }
+
+mode="${1:-}"
+[[ "$mode" =~ ^(check|apply|assemble)$ ]] || usage
+shift
+target_rev='main@upstream'
+candidate=''
+fetch=1
+run_tests=1
+push=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --target) target_rev="$2"; shift 2 ;;
+    --candidate) candidate="$2"; shift 2 ;;
+    --no-fetch) fetch=0; shift ;;
+    --no-tests) run_tests=0; shift ;;
+    --push) push=1; shift ;;
+    *) usage ;;
+  esac
+done
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+log_dir="${FORK_UPDATE_LOG_DIR:-/tmp/fork-update-logs/$(date -u +%Y%m%dT%H%M%SZ)}"
+mkdir -p "$log_dir"
+work_root="$(mktemp -d /tmp/fork-update-wt.XXXXXX)"
+worktrees=()
+cleanup() {
+  if [[ -s "$log_dir/upstream-failures.txt" ]]; then
+    sort -u "$log_dir/upstream-failures.txt" | sed 's/^/note: also fails on upstream, ignored: /'
+  fi
+  for wt in "${worktrees[@]}"; do git worktree remove --force "$wt" >/dev/null 2>&1 || true; done
+  rm -rf "$work_root"
+}
+trap cleanup EXIT
+
+test_exclude="${FORK_UPDATE_TEST_EXCLUDE:-tests/controller|tests/crdcel|/tests/e2e|tests/data-plane}"
+git_ident=(-c user.name=fork-update -c user.email=fork-update@localhost)
+
+# Small machines (such as 3 GB orbs) get OOM-killed by parallel compiles and golangci-lint.
+# Below 8 GiB, cap Go parallelism and set a soft memory limit.
+mem_mib="$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo 2>/dev/null || echo 0)"
+lint_concurrency=()
+if [[ "$mem_mib" -gt 0 && "$mem_mib" -lt 8192 ]]; then
+  jobs=$((mem_mib < 4096 ? 1 : 2))
+  export GOFLAGS="${GOFLAGS:+$GOFLAGS }-p=$jobs"
+  export GOGC="${GOGC:-50}"
+  export GOMEMLIMIT="${GOMEMLIMIT:-$((mem_mib * 60 / 100))MiB}"
+  lint_concurrency=(--concurrency="$jobs")
+fi
+
+progress() { printf 'fork-update: %s\n' "$*" >&2; }
+report() { printf '%s\n' "$*"; }
+rev() { jj log --no-graph --color=never -r "exactly($1, 1)" -T 'commit_id'; }
+
+if [[ "$(git rev-parse --is-shallow-repository)" == true ]]; then
+  progress "shallow clone detected; running fork-bootstrap"
+  "$(dirname "${BASH_SOURCE[0]}")/fork-bootstrap" >&2
+fi
+
+# Orb snapshots can carry an older jj repo config, whose fork_parents() may miss a tier, so
+# install the config that ships with this script whenever the repo's copy differs.
+skill_config="$(dirname "${BASH_SOURCE[0]}")/../jj-repo-config.toml"
+if [[ -f "$skill_config" ]] && ! cmp -s "$skill_config" "$(jj config path --repo)"; then
+  cp "$skill_config" "$(jj config path --repo)"
+  progress "installed the skill's jj repo config"
+fi
+
+if [[ $fetch -eq 1 ]]; then
+  progress "fetching origin and upstream"
+  jj git fetch --remote origin --quiet
+  jj git fetch --remote upstream --quiet
+fi
+# check_script_current exits 1 when this script matches neither the copy in tooling/agent-workflow
+# on origin nor the one in the local bookmark. With no copy at all there is nothing to compare.
+script_rel='.agents/skills/ai-gateway-patch-workflow/scripts/fork-update'
+check_script_current() {
+  [[ "${FORK_UPDATE_ALLOW_STALE_SCRIPT:-}" == 1 ]] && return 0
+  local me c blob found=0
+  local -a tool_commits
+  me="$(git hash-object "${BASH_SOURCE[0]}")"
+  mapfile -t tool_commits < <({
+    git rev-parse -q --verify refs/remotes/origin/tooling/agent-workflow || true
+    jj log --no-graph --color=never -r 'bookmarks(exact:"tooling/agent-workflow")' -T 'commit_id ++ "\n"' 2>/dev/null || true
+  })
+  for c in "${tool_commits[@]}"; do
+    blob="$(git rev-parse -q --verify "$c:$script_rel" 2>/dev/null)" || continue
+    found=1
+    [[ "$blob" == "$me" ]] && return 0
+  done
+  [[ $found -eq 0 ]] && return 0
+  echo "fork-update: ${BASH_SOURCE[0]} matches neither tooling/agent-workflow on origin nor the local bookmark; it is stale." >&2
+  echo "fork-update: rerun from an up-to-date checkout (or set FORK_UPDATE_ALLOW_STALE_SCRIPT=1 to override)." >&2
+  exit 1
+}
+check_script_current
+
+# origin_commit prints the commit origin has for a bookmark, or nothing when it lacks it.
+origin_commit() {
+  jj log --no-graph --color=never -r "remote_bookmarks(exact:\"$1\", remote=exact:\"origin\")" -T 'commit_id ++ "\n"' 2>/dev/null | head -n1
+}
+
+# on_origin succeeds when a commit is reachable from some ref on origin.
+on_origin() { [[ -n "$(git for-each-ref --count=1 --contains "$1" refs/remotes/origin)" ]]; }
+
+# reconcile_bookmarks makes the local bookmarks in the fork's namespaces agree with origin.
+# Orb snapshots carry stale local bookmarks, and Amp updates them with plain `git fetch`, so a
+# bookmark may be behind, conflicted, restacked, or deleted on origin. Nothing on origin is
+# ever deleted or rewritten. Rules:
+#   1 origin has it and local is behind: move local to origin's commit
+#   2 origin has it and the local bookmark is conflicted: set it to origin's commit
+#   3 origin has it and local is ahead or diverged: keep local (unpushed work) and report it
+#   3b diverged, but the local commit is reachable from some origin ref: take origin's commit
+#   4 origin lacks it but the local commit is reachable from some origin ref: it was published
+#     and deleted, so forget the local bookmark
+#   5 origin lacks it and the commit is on no origin ref: new local work, keep it
+reconcile_bookmarks() {
+  local name o l
+  local -a names locals
+  mapfile -t names < <(jj bookmark list --color=never 'exact:main' 'exact:fork/main' 'glob:patch/*' \
+    'glob:tooling/*' 'glob:glue/*' -T 'if(!remote && present, name ++ "\n")' 2>/dev/null | sort -u)
+  for name in "${names[@]}"; do
+    mapfile -t locals < <(jj log --no-graph --color=never -r "bookmarks(exact:\"$name\")" -T 'commit_id ++ "\n"')
+    [[ ${#locals[@]} -gt 0 ]] || continue
+    o="$(origin_commit "$name")"
+    l="${locals[0]}"
+    if [[ -z "$o" ]]; then
+      for l in "${locals[@]}"; do on_origin "$l" || continue 2; done
+      jj bookmark delete "$name" --quiet
+      report "reconciled: $name forgotten, ${locals[0]:0:12} is on origin but the bookmark was deleted there (rule 4)"
+    elif [[ ${#locals[@]} -gt 1 ]]; then
+      jj bookmark set "$name" -r "$o" --allow-backwards --quiet
+      report "reconciled: $name conflicted -> ${o:0:12} (rule 2)"
+    elif [[ "$l" == "$o" ]]; then
+      continue
+    elif git merge-base --is-ancestor "$l" "$o"; then
+      jj bookmark set "$name" -r "$o" --allow-backwards --quiet
+      report "reconciled: $name ${l:0:12} -> ${o:0:12} (rule 1)"
+    elif git merge-base --is-ancestor "$o" "$l"; then
+      report "reconciled: $name kept at ${l:0:12}, ahead of origin ${o:0:12} (rule 3)"
+    elif on_origin "$l"; then
+      jj bookmark set "$name" -r "$o" --allow-backwards --quiet
+      report "reconciled: $name ${l:0:12} -> ${o:0:12}, local commit already on origin (rule 3b)"
+    else
+      report "reconciled: $name kept at ${l:0:12}, diverged from origin ${o:0:12} with unpublished commits (rule 3)"
+    fi
+  done
+}
+reconcile_bookmarks
+
+# Track series and glues that other threads pushed, even where the repo config predates
+# auto-tracking, so fork_parents() includes them.
+jj bookmark track 'patch/*' 'tooling/*' 'glue/*' --remote origin >/dev/null 2>&1
+
+# origin_refs lists origin's fork bookmarks and their commits, as last fetched.
+origin_refs() {
+  git for-each-ref --format='%(refname:lstrip=3) %(objectname)' refs/remotes/origin/fork/main \
+    refs/remotes/origin/patch refs/remotes/origin/tooling refs/remotes/origin/glue
+}
+origin_snapshot="$(origin_refs)"
+
+# guard_no_drops refuses (returns 20) when fork/main at commit $2 would silently drop a
+# patch/*, tooling/*, or glue/* bookmark that origin has. Each such bookmark must be merged
+# into the commit (its origin commit, or the local bookmark's rewritten commit, is an ancestor)
+# or deliberately deleted here: origin's bookmark is tracked and the local one is absent.
+# An origin bookmark this clone never tracked is not deleted. $1 is the verb for the message.
+guard_no_drops() {
+  local name o l ok tracked dropped=()
+  local -a locals
+  while read -r name o; do
+    [[ "$name" == fork/main ]] && continue
+    git merge-base --is-ancestor "$o" "$2" && continue
+    ok=1
+    mapfile -t locals < <(jj log --no-graph --color=never -r "bookmarks(exact:\"$name\")" -T 'commit_id ++ "\n"' 2>/dev/null)
+    if [[ ${#locals[@]} -gt 0 ]]; then
+      for l in "${locals[@]}"; do git merge-base --is-ancestor "$l" "$2" || ok=0; done
+    else
+      tracked="$(jj bookmark list --color=never "exact:$name" -T 'if(remote == "origin" && tracked, "t")' 2>/dev/null)"
+      [[ -n "$tracked" ]] || ok=0
+    fi
+    [[ $ok -eq 1 ]] || dropped+=("$name")
+  done < <(origin_refs)
+  [[ ${#dropped[@]} -gt 0 ]] || return 0
+  for name in "${dropped[@]}"; do report "not $1 fork/main: it would drop $name, which origin has"; done
+  report "track each with jj bookmark track <name> --remote origin so it is merged, or delete it deliberately with jj bookmark delete <name>"
+  return 20
+}
+
+target="$(rev "$target_rev")"
+# Skip bookmarks deleted locally: jj lists them until the deletion is pushed.
+mapfile -t patches < <(jj bookmark list --color=never 'patch/* | tooling/*' -T 'if(!remote && present, name ++ "\n")' 2>/dev/null | sort -u)
+[[ ${#patches[@]} -gt 0 ]] || { echo "fork-update: no patch/* or tooling/* bookmarks" >&2; exit 1; }
+mapfile -t glues < <(jj bookmark list --color=never 'glue/*' -T 'if(!remote && present, name ++ "\n")' 2>/dev/null | sort -u)
+
+# go_packages lists the existing Go package directories changed between two commits.
+go_packages() {
+  local from="$1" to="$2" dir
+  git diff --name-only "$from" "$to" -- '*.go' | xargs -r -n1 dirname | sort -u | while read -r dir; do
+    if compgen -G "$dir/*.go" >/dev/null; then printf './%s\n' "$dir"; fi
+  done
+}
+
+# restore_license_headers re-adds the repository license header that `make apigen` strips from
+# regenerated Go and YAML files. license-eye cannot enumerate files outside the main checkout,
+# so this mirrors its output for the generated files.
+restore_license_headers() {
+  local f c
+  while read -r f; do
+    case "$f" in
+      *.go) c='//' ;;
+      *.yaml | *.yml) c='#' ;;
+      *) continue ;;
+    esac
+    head -n1 "$f" | grep -q 'Copyright Envoy AI Gateway Authors' && continue
+    {
+      printf '%s Copyright Envoy AI Gateway Authors\n' "$c"
+      printf '%s SPDX-License-Identifier: Apache-2.0\n' "$c"
+      printf '%s The full text of the Apache license is available in the LICENSE file at\n' "$c"
+      printf '%s the root of the repo.\n\n' "$c"
+      cat "$f"
+    } >"$f.fork-update" && mv "$f.fork-update" "$f"
+  done < <(git diff --name-only)
+}
+
+# generated_files_current regenerates CRDs, deepcopy code, and API docs in the current
+# directory and fails if any tracked file changes.
+generated_files_current() {
+  make apigen apidoc >/dev/null 2>&1
+  restore_license_headers
+  git diff --quiet || { git diff --stat; return 1; }
+}
+
+baseline_dir=""
+
+# baseline_tree returns a worktree at the target, creating it on first use.
+baseline_tree() {
+  if [[ -z "$baseline_dir" ]]; then
+    baseline_dir="$work_root/baseline"
+    git worktree add --quiet --detach "$baseline_dir" "$target"
+    worktrees+=("$baseline_dir")
+  fi
+  printf '%s\n' "$baseline_dir"
+}
+
+# go_test_vs_baseline runs `go test` for the given packages in the current directory.
+# A failing test is retried once; if it still fails, it is run on upstream at the target.
+# Tests that fail on upstream too are upstream or environment failures: they are reported
+# as notes and do not fail the check. Build failures always fail it.
+go_test_vs_baseline() {
+  local out pkg test real=0 base
+  out="$(mktemp "$work_root/test.XXXXXX")"
+  if go test -count=1 "$@" >"$out" 2>&1; then return 0; fi
+  cat "$out"
+  base="$(baseline_tree)"
+  while read -r pkg test; do
+    if [[ "$test" == "-" ]]; then
+      echo "fork-update: $pkg failed without a failing test (build or setup failure)"
+      real=1
+      continue
+    fi
+    # A test is blamed on the patch only when it fails every retry here and passes every
+    # run on upstream. Intermittent upstream tests otherwise fail a single comparison by
+    # chance (a 35% flake passes one upstream run 65% of the time).
+    local attempt passed=0
+    for attempt in 1 2 3; do
+      if go test -count=1 -run "^${test}\$" "$pkg" >/dev/null 2>&1; then passed=1; break; fi
+    done
+    if ((passed)); then
+      echo "fork-update: note: $pkg $test failed, then passed on retry $attempt (flaky)"
+    elif (cd "$base" && go test -count=5 -run "^${test}\$" "$pkg" >/dev/null 2>&1); then
+      echo "fork-update: $pkg $test fails every retry here and passes 5 of 5 runs on upstream ${target:0:12}"
+      real=1
+    else
+      echo "fork-update: note: $pkg $test also fails on upstream ${target:0:12}; ignoring"
+      printf '%s %s\n' "$pkg" "$test" >>"$log_dir/upstream-failures.txt"
+    fi
+  done < <(awk '
+    /^--- FAIL: / { tests[++n] = $3 }
+    /^FAIL\t/ { if (n == 0) print $2, "-"; for (i = 1; i <= n; i++) print $2, tests[i]; n = 0 }
+  ' "$out")
+  return "$real"
+}
+
+# check_patch_tree runs the patch's standalone checks in the current directory. Before each
+# stage it logs a "fork-update-stage:" marker so a failure can be rated by stage.
+check_patch_tree() {
+  local name="$1" pkgs
+  mapfile -t pkgs < <(go_packages "$target" HEAD)
+  echo "fork-update-stage: build"
+  go build ./... || return 1
+  if [[ ${#pkgs[@]} -gt 0 ]]; then
+    echo "fork-update-stage: vet"
+    go vet "${pkgs[@]}" || return 1
+    echo "fork-update-stage: test"
+    go_test_vs_baseline "${pkgs[@]}" || return 1
+  fi
+  if ! git diff --quiet "$target" HEAD -- api/; then
+    echo "fork-update-stage: generated"
+    generated_files_current || { echo "generated files are out of date for $name"; return 1; }
+  fi
+}
+
+# Difficulty tiers pick the agent mode for a fixer: low, medium, or high.
+#
+# Conflicts are measured at the first conflicting commit. Generated files do not count,
+# because fixers regenerate them. Thresholds:
+#   low     only generated files conflict, or at most 2 files, 3 hunks, 60 conflicted
+#           lines, and 3 commits left to replay
+#   high    more than 12 files, 20 hunks, 400 conflicted lines, or 10 commits to replay
+#   medium  everything else
+# Broken patches are rated by the failing stage: generated files are low, build or vet is
+# low with at most 2 compiler errors and medium otherwise, and failing tests are high.
+is_generated_file() {
+  case "$1" in
+    api/*/zz_generated.deepcopy.go | manifests/charts/ai-gateway-crds-helm/templates/* | site/docs/api/api.mdx) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+conflict_tier() {
+  local files="$1" hunks="$2" lines="$3" commits="$4"
+  if ((files == 0)); then echo low; return; fi
+  if ((files > 12 || hunks > 20 || lines > 400 || commits > 10)); then echo high; return; fi
+  if ((files <= 2 && hunks <= 3 && lines <= 60 && commits <= 3)); then echo low; return; fi
+  echo medium
+}
+
+broken_tier() {
+  local log="$1" stage errors
+  stage="$(grep -o '^fork-update-stage: [a-z]*' "$log" | tail -n1 | cut -d' ' -f2)"
+  errors="$(grep -cE '^[^ ]+\.go:[0-9]+:[0-9]+: ' "$log" || true)"
+  case "$stage" in
+    generated) echo low ;;
+    build | vet) if ((errors <= 2)); then echo low; else echo medium; fi ;;
+    *) echo high ;;
+  esac
+}
+
+declare -A status detail replay_tree tier
+assemble_conflict=0
+stale=()
+
+# replay_patch cherry-picks a patch onto the target in a throwaway worktree and checks it.
+replay_patch() {
+  local name="$1" tip base wt commits c files
+  tip="$(rev "bookmarks(exact:\"$name\")")"
+  if git merge-base --is-ancestor "$target" "$tip"; then
+    status[$name]=up-to-date
+    return
+  fi
+  stale+=("$name")
+  base="$(git merge-base "$target" "$tip")"
+  if [[ -n "$(git rev-list --merges "$base..$tip")" ]]; then
+    status[$name]=conflict
+    tier[$name]=high
+    detail[$name]="series contains merge commits"
+    return
+  fi
+  wt="$work_root/${name//\//_}"
+  git worktree add --quiet --detach "$wt" "$target"
+  worktrees+=("$wt")
+  mapfile -t commits < <(git rev-list --reverse "$base..$tip")
+  local i f code_files hunks lines counts
+  for i in "${!commits[@]}"; do
+    c="${commits[$i]}"
+    if ! git -C "$wt" "${git_ident[@]}" cherry-pick --allow-empty --empty=keep "$c" >/dev/null 2>&1; then
+      mapfile -t files < <(git -C "$wt" diff --name-only --diff-filter=U)
+      code_files=0 hunks=0 lines=0
+      for f in "${files[@]}"; do
+        is_generated_file "$f" && continue
+        code_files=$((code_files + 1))
+        read -r -a counts < <(awk '
+          /^<<<<<<< / { inside = 1; h++; next }
+          /^>>>>>>> / { inside = 0; next }
+          inside && !/^=======$/ { l++ }
+          END { print h + 0, l + 0 }
+        ' "$wt/$f")
+        hunks=$((hunks + counts[0])) lines=$((lines + counts[1]))
+      done
+      git -C "$wt" cherry-pick --abort >/dev/null 2>&1 || true
+      status[$name]=conflict
+      tier[$name]="$(conflict_tier "$code_files" "$hunks" "$lines" "$((${#commits[@]} - i))")"
+      detail[$name]="first conflict at ${c:0:12} \"$(git log -1 --format=%s "$c")\": $hunks hunks, $lines lines in $code_files non-generated of ${#files[@]} files ($(printf '%s\n' "${files[@]}" | paste -sd, -)); $((${#commits[@]} - i)) commits left to replay"
+      return
+    fi
+  done
+  replay_tree[$name]="$(git -C "$wt" rev-parse 'HEAD^{tree}')"
+  if [[ $run_tests -eq 1 ]]; then
+    progress "checking $name on ${target:0:12}"
+    local log="$log_dir/${name//\//_}.log"
+    if ! (cd "$wt" && check_patch_tree "$name") >"$log" 2>&1; then
+      status[$name]=broken
+      tier[$name]="$(broken_tier "$log")"
+      detail[$name]="replays cleanly but fails $(grep -o '^fork-update-stage: [a-z]*' "$log" | tail -n1 | cut -d' ' -f2) checks; log: $log"
+      return
+    fi
+  fi
+  status[$name]=clean
+}
+
+run_check() {
+  report "target $target $(git log -1 --format=%s "$target")"
+  local name needs_agent=0
+  for name in "${patches[@]}"; do
+    replay_patch "$name"
+    report "$name ${status[$name]}${tier[$name]:+ [tier=${tier[$name]}]}${detail[$name]:+ — ${detail[$name]}}"
+    [[ ${status[$name]} == conflict || ${status[$name]} == broken ]] && needs_agent=1
+  done
+  if [[ $needs_agent -eq 1 ]]; then return 20; fi
+  if [[ ${#stale[@]} -gt 0 ]]; then return 10; fi
+  return 0
+}
+
+# glue_names prints the series names a glue merges: glue/a+b merges a and b.
+glue_names() { tr '+' '\n' <<<"${1#glue/}" | LC_ALL=C sort -u; }
+
+# glue_series prints the bookmark of each series a glue names: patch/<name> or tooling/<name>.
+glue_series() {
+  local glue="$1" name found prefix
+  local -a names
+  mapfile -t names < <(glue_names "$glue")
+  if ((${#names[@]} < 2)); then
+    echo "$glue must name at least two series, as glue/<a>+<b>"
+    return 1
+  fi
+  for name in "${names[@]}"; do
+    found=()
+    for prefix in patch tooling; do
+      if [[ " ${patches[*]} " == *" $prefix/$name "* ]]; then found+=("$prefix/$name"); fi
+    done
+    case ${#found[@]} in
+      1) printf '%s\n' "${found[0]}" ;;
+      0) echo "$glue names $name, but neither patch/$name nor tooling/$name exists; delete the glue if that series was retired"; return 1 ;;
+      *) echo "$glue names $name, which is ambiguous between patch/$name and tooling/$name"; return 1 ;;
+    esac
+  done
+}
+
+# glue_parents prints the sorted commits a glue must merge: the tips of the series it names,
+# reduced to heads together with any glue that merges a proper subset of those series, so
+# glue/a+b+c merges glue/a+b and patch/c. On error it prints the reason and returns 1.
+glue_parents() {
+  local glue="$1" members other series revs=()
+  members="$(glue_series "$glue")" || { printf '%s\n' "$members"; return 1; }
+  while read -r series; do revs+=("bookmarks(exact:\"$series\")"); done <<<"$members"
+  for other in "${glues[@]}"; do
+    [[ "$other" == "$glue" ]] && continue
+    if [[ "$(glue_names "$other")" != "$(glue_names "$glue")" &&
+      -z "$(LC_ALL=C comm -23 <(glue_names "$other") <(glue_names "$glue"))" ]]; then
+      revs+=("bookmarks(exact:\"$other\")")
+    fi
+  done
+  jj log --no-graph --color=never -r "heads($(IFS='|'; echo "${revs[*]}"))" -T 'commit_id ++ "\n"' | LC_ALL=C sort
+}
+
+# restack_glues moves every glue whose parents are not the current tips of its series onto
+# those tips. jj duplicate carries the glue's resolution to the new parents. Glues that merge
+# fewer series go first, so a nested glue lands on its inner glue's new commit. Returns 20
+# if a glue is invalid or has conflicts; the bookmark still moves, so an agent can resolve
+# the conflict in the glue itself.
+restack_glues() {
+  local glue expected actual out new c files rc=0
+  local -a ordered onto
+  mapfile -t ordered < <(for glue in "${glues[@]}"; do
+    printf '%d %s\n' "$(glue_names "$glue" | wc -l)" "$glue"
+  done | LC_ALL=C sort -n | cut -d' ' -f2)
+  for glue in "${ordered[@]}"; do
+    if ! expected="$(glue_parents "$glue")"; then
+      report "glue invalid — $expected"
+      rc=20
+      continue
+    fi
+    actual="$(jj log --no-graph --color=never -r "parents(bookmarks(exact:\"$glue\"))" -T 'commit_id ++ "\n"' | LC_ALL=C sort)"
+    if [[ "$expected" != "$actual" ]]; then
+      onto=()
+      while read -r c; do onto+=(-o "$c"); done <<<"$expected"
+      out="$(jj duplicate --color=never "bookmarks(exact:\"$glue\")" "${onto[@]}" 2>&1)"
+      new="$(rev "$(awk '$1 == "Duplicated" { print $5 }' <<<"$out")")"
+      jj bookmark set "$glue" -r "$new" --allow-backwards --quiet
+      report "$glue -> ${new:0:12} (restacked)"
+    fi
+    new="$(rev "bookmarks(exact:\"$glue\")")"
+    if [[ -n "$(jj log --no-graph -r "$new & conflicts()" -T 'commit_id')" ]]; then
+      files="$(jj resolve --list -r "$new" | wc -l | tr -d ' ')"
+      report "glue conflict [tier=$( ((files > 2)) && echo high || echo medium)] — $glue at ${new:0:12} has conflicts:"
+      jj resolve --list -r "$new" | sed 's/^/  /'
+      report "resolve them in the glue (jj new ${new:0:12}, edit, jj squash), then run: fork-update assemble --push"
+      rc=20
+    fi
+  done
+  return "$rc"
+}
+
+# nested_series prints each series bookmark that is an ancestor of another series bookmark.
+nested_series() {
+  local inner outer
+  for inner in "${patches[@]}"; do
+    for outer in "${patches[@]}"; do
+      [[ "$inner" == "$outer" ]] && continue
+      if git merge-base --is-ancestor "$(rev "bookmarks(exact:\"$inner\")")" "$(rev "bookmarks(exact:\"$outer\")")"; then
+        printf '%s is contained in %s\n' "$inner" "$outer"
+      fi
+    done
+  done
+}
+
+# conflicting_pairs prints each pair of fork_parents() that conflicts when merged alone, with
+# the glue that resolves it and the command that starts that glue. A glue that resolves a
+# conflict with another glue names every series of both, so glue/a+b and patch/c need
+# glue/a+b+c, whose parents are exactly glue/a+b and patch/c.
+conflicting_pairs() {
+  local i j glue
+  local -a commits names
+  mapfile -t commits < <(jj log --no-graph --color=never -r 'fork_parents()' -T 'commit_id ++ "\n"')
+  for i in "${!commits[@]}"; do
+    names[i]="$(jj log --no-graph --color=never -r "${commits[i]}" \
+      -T 'local_bookmarks.filter(|b| b.name().starts_with("patch/") || b.name().starts_with("tooling/") || b.name().starts_with("glue/")).map(|b| b.name()).join("\n")' | head -n1)"
+  done
+  for ((i = 0; i < ${#commits[@]}; i++)); do
+    for ((j = i + 1; j < ${#commits[@]}; j++)); do
+      if ! git merge-tree --write-tree --name-only --no-messages "${commits[i]}" "${commits[j]}" >/dev/null 2>&1; then
+        glue="glue/$(for name in "${names[i]}" "${names[j]}"; do
+          if [[ "$name" == glue/* ]]; then glue_names "$name"; else printf '%s\n' "${name#*/}"; fi
+        done | LC_ALL=C sort -u | paste -sd+ -)"
+        printf '%s + %s: add %s with: jj new %s %s\n' "${names[i]}" "${names[j]}" "$glue" \
+          "'bookmarks(exact:\"${names[i]}\")'" "'bookmarks(exact:\"${names[j]}\")'"
+      fi
+    done
+  done
+}
+
+# push_bookmarks publishes main, the series and glue bookmarks, and fork/main. Another thread
+# may have shipped while this run was checking, so it first fetches origin again and refuses
+# to push if fork/main or any patch/*, tooling/*, or glue/* bookmark changed on origin since
+# the run started: pushing would drop that work from fork/main. Returns 20 in that case.
+push_bookmarks() {
+  local args=() name changed
+  jj git fetch --remote origin --quiet
+  changed="$({ diff <(printf '%s\n' "$origin_snapshot") <(origin_refs) || true; } |
+    sed -n 's/^[<>] \([^ ]*\) .*/\1/p' | sort -u)"
+  if [[ -n "$changed" ]]; then
+    report "origin changed while fork-update ran; nothing pushed. Changed on origin:"
+    printf '%s\n' "$changed" | sed 's/^/  /'
+    report "rerun: fork-update assemble --push"
+    return 20
+  fi
+  guard_no_drops pushing "$(rev fork/main)" || return 20
+  # Never push backwards: skip a bookmark whose commit is a strict ancestor of origin's.
+  for name in "${patches[@]}" "${glues[@]}" fork/main; do
+    local o l
+    o="$(origin_commit "$name")"
+    l="$(rev "bookmarks(exact:\"$name\")")"
+    if [[ -n "$o" && "$l" != "$o" ]] && git merge-base --is-ancestor "$l" "$o"; then
+      report "not pushing $name: ${l:0:12} is behind origin ${o:0:12}"
+    else
+      args+=(-b "$name")
+    fi
+  done
+  # main mirrors upstream, so it only fast-forwards.
+  if git merge-base --is-ancestor "$(rev 'main@origin')" "$(rev main)"; then args+=(-b main); fi
+  progress "pushing ${args[*]}"
+  jj git push --remote origin "${args[@]}"
+}
+
+# assemble builds and checks a fresh fork/main. Returns 0 on success or no change, 20 otherwise.
+assemble() {
+  local parents current merge wt log nested
+  # Series are independent, so one inside another is a stale or renamed bookmark. Pushing it
+  # would re-create it on origin.
+  nested="$(nested_series)"
+  if [[ -n "$nested" ]]; then
+    report "a series contains another series; fork/main not moved:"
+    printf '%s\n' "$nested" | sed 's/^/  /'
+    report "if the inner one is obsolete (renamed or merged), delete it: jj bookmark delete <name>"
+    report "(or jj bookmark forget <name> if origin never had it); otherwise rebuild it on trunk()"
+    return 20
+  fi
+  # A stale glue would merge outdated series, so every glue must sit on current tips first.
+  if ! restack_glues; then
+    assemble_conflict=1
+    return 20
+  fi
+  parents="$(jj log --no-graph --color=never -r 'fork_parents()' -T 'commit_id ++ "\n"' | sort)"
+  current="$(jj log --no-graph --color=never -r 'parents(fork_head())' -T 'commit_id ++ "\n"' 2>/dev/null | sort || true)"
+  local op
+  op="$(jj op log -n1 --no-graph -T 'self.id()')"
+  if [[ -n "$candidate" ]]; then
+    merge="$(rev "$candidate")"
+    if [[ "$(jj log --no-graph --color=never -r "parents($merge)" -T 'commit_id ++ "\n"' | sort)" != "$parents" ]]; then
+      report "candidate ${merge:0:12} does not merge exactly fork_parents()"
+      return 20
+    fi
+  elif [[ "$parents" == "$current" ]]; then
+    # A merge built locally, for example by jj fork-assemble, has not been checked yet.
+    if [[ $run_tests -eq 0 || "$(rev fork/main)" == "$(rev 'fork/main@origin' 2>/dev/null || true)" ]]; then
+      guard_no_drops moving "$(rev fork/main)" || return 20
+      report "fork/main already merges trunk() and every patch"
+      return 0
+    fi
+    # Fall through to the checks below with the existing merge.
+    merge="$(rev fork/main)"
+    progress "fork/main ${merge:0:12} merges every patch but is not on origin yet; checking it"
+  else
+    jj new --quiet 'fork_parents()' -m "internal: assemble fork patch set"
+    merge="$(rev @)"
+  fi
+  if ! guard_no_drops moving "$merge"; then
+    [[ -z "$candidate" ]] && jj op restore --quiet "$op"
+    return 20
+  fi
+  if [[ -n "$(jj log --no-graph -r "$merge & conflicts()" -T 'commit_id')" ]]; then
+    local conflicted merge_tier=medium
+    conflicted="$(jj resolve --list -r "$merge" | wc -l | tr -d ' ')"
+    ((conflicted > 2)) && merge_tier=high
+    report "fork/main conflict [tier=$merge_tier] — merge ${merge:0:12} has conflicts between patches:"
+    jj resolve --list -r "$merge" | sed 's/^/  /'
+    local pairs
+    pairs="$(conflicting_pairs)"
+    if [[ -n "$pairs" ]]; then
+      printf '%s\n' "$pairs" | sed 's/^/  conflicting pair: /'
+      report "add the first pair's glue: run its jj new command, resolve the conflicts, and create"
+      report "the named glue bookmark on the result. Then rerun: fork-update assemble --push."
+      report "Later pairs often resolve themselves once the first glue exists."
+      [[ -z "$candidate" ]] && jj op restore --quiet "$op"
+    else
+      report "no single pair conflicts; resolve the merge in that commit, then run: fork-update assemble --candidate ${merge:0:12} --push"
+    fi
+    assemble_conflict=1
+    return 20
+  fi
+  if [[ $run_tests -eq 1 ]]; then
+    wt="$work_root/fork-main"
+    git worktree add --quiet --detach "$wt" "$merge"
+    worktrees+=("$wt")
+    log="$log_dir/fork-main.log"
+    progress "checking fork/main candidate ${merge:0:12}"
+    # The package list is split into arguments on purpose.
+    # shellcheck disable=SC2046
+    if ! (cd "$wt" &&
+      go build ./... &&
+      go vet ./... &&
+      go tool -modfile=tools/go.mod golangci-lint run "${lint_concurrency[@]}" --build-tags=test_crdcel,test_controller,test_extproc,test_e2e ./... &&
+      generated_files_current &&
+      go_test_vs_baseline $(go list ./... | grep -v -E "$test_exclude")) >"$log" 2>&1; then
+      report "fork/main candidate ${merge:0:12} fails checks; fork/main not moved; log: $log"
+      report "if the failure comes from combining two patches that pass on their own, such as a"
+      report "duplicate declaration, fix it in a glue/<a>+<b> for that pair"
+      [[ -z "$candidate" ]] && jj op restore --quiet "$op"
+      return 20
+    fi
+  fi
+  jj bookmark set fork/main -r "$merge" --allow-backwards --quiet
+  jj new --quiet fork/main
+  report "fork/main -> ${merge:0:12}"
+}
+
+# apply_updates rebases every clean stale patch with jj and verifies each result matches the
+# tree the throwaway replay produced.
+apply_updates() {
+  local name tip base op new_short new_tip
+  op="$(jj op log -n1 --no-graph -T 'self.id()')"
+  for name in "${stale[@]}"; do
+    tip="$(rev "bookmarks(exact:\"$name\")")"
+    base="$(git merge-base "$target" "$tip")"
+    new_short="$(jj duplicate --color=never "$base..$tip" -o "$target" 2>&1 |
+      awk -v src="${tip:0:12}" '$1 == "Duplicated" && $2 == src { print $5 }')"
+    new_tip="$(rev "$new_short")"
+    if [[ -n "$(jj log --no-graph -r "($target..$new_tip) & conflicts()" -T 'commit_id')" ]] ||
+      [[ "$(git rev-parse "$new_tip^{tree}")" != "${replay_tree[$name]}" ]]; then
+      report "$name: jj rebase differs from the verified replay; restoring operation ${op:0:12}"
+      jj op restore --quiet "$op"
+      return 20
+    fi
+    jj bookmark set "$name" -r "$new_tip" --allow-backwards --quiet
+    report "$name -> ${new_tip:0:12}"
+  done
+  if git merge-base --is-ancestor "$(rev main)" "$target"; then
+    jj bookmark set main -r "$target" --quiet
+    report "main -> ${target:0:12}"
+  fi
+}
+
+case "$mode" in
+  check)
+    rc=0; run_check || rc=$?
+    exit "$rc"
+    ;;
+  apply)
+    rc=0; run_check || rc=$?
+    if [[ $rc -eq 20 ]]; then report "not applying: some patches need an agent"; exit 20; fi
+    apply_op="$(jj op log -n1 --no-graph -T 'self.id()')"
+    if [[ $rc -eq 10 ]]; then apply_updates || exit $?; fi
+    rc=0; assemble || rc=$?
+    if [[ $rc -ne 0 && $assemble_conflict -eq 0 ]]; then
+      report "restoring operation ${apply_op:0:12}; no bookmarks moved"
+      jj op restore --quiet "$apply_op"
+    fi
+    if [[ $rc -eq 0 && $push -eq 1 ]]; then push_bookmarks || exit $?; fi
+    exit "$rc"
+    ;;
+  assemble)
+    rc=0; assemble || rc=$?
+    if [[ $rc -eq 0 && $push -eq 1 ]]; then push_bookmarks || exit $?; fi
+    exit "$rc"
+    ;;
+esac

@@ -54,6 +54,7 @@ const (
 	GenAIOperationRerank               GenAIOperation = "rerank"
 	GenAIOperationSystemOne            GenAIOperation = "systemone"
 	GenAIOperationTokenize             GenAIOperation = "tokenize"
+	GenAIOperationGenerateContent      GenAIOperation = "generate_content"
 	GenAIOperationResponsesInputTokens GenAIOperation = "responses_input_tokens"
 	GenAIOperationCountTokens          GenAIOperation = "count_tokens"
 
