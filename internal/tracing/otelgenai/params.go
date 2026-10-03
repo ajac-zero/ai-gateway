@@ -48,6 +48,20 @@ func (p *params) int64(key string, v *int64) {
 	}
 }
 
+// stream records gen_ai.request.stream only when true: the conventions say an
+// unset attribute means the request is non-streaming.
+func (p *params) stream(v bool) {
+	if v {
+		p.attrs = append(p.attrs, attribute.Bool(RequestStream, true))
+	}
+}
+
+func (p *params) str(key, v string) {
+	if v != "" {
+		p.attrs = append(p.attrs, attribute.String(key, v))
+	}
+}
+
 func (p *params) stringSlice(key string, v []string) {
 	if len(v) > 0 {
 		p.attrs = append(p.attrs, attribute.StringSlice(key, v))
@@ -66,6 +80,16 @@ func chatRequestAttrs(req *openai.ChatCompletionRequest) []attribute.KeyValue {
 	p.float32(RequestPresencePenalty, req.PresencePenalty)
 	p.int(RequestSeed, req.Seed)
 	p.int(RequestChoiceCount, req.N)
+	p.stream(req.Stream)
+	p.str(RequestReasoningLevel, string(req.ReasoningEffort))
+	if rf := req.ResponseFormat; rf != nil {
+		switch {
+		case rf.OfJSONSchema != nil, rf.OfJSONObject != nil:
+			p.str(OutputType, OutputTypeJSON)
+		case rf.OfText != nil:
+			p.str(OutputType, OutputTypeText)
+		}
+	}
 
 	maxTokens := req.MaxCompletionTokens
 	if maxTokens == nil {
@@ -88,6 +112,7 @@ func completionRequestAttrs(req *openai.CompletionRequest) []attribute.KeyValue 
 	p.float64(RequestPresencePenalty, req.PresencePenalty)
 	p.int64(RequestSeed, req.Seed)
 	p.int(RequestChoiceCount, req.N)
+	p.stream(req.Stream)
 	if req.MaxTokens != nil {
 		p.attrs = append(p.attrs, attribute.Int(RequestMaxTokens, *req.MaxTokens))
 	}
@@ -137,4 +162,22 @@ func anyStopSequences(stop any) []string {
 	default:
 		return nil
 	}
+}
+
+// imageGenerationRequestAttrs records the requested output modality and
+// streaming mode.
+func imageGenerationRequestAttrs(req *openai.ImageGenerationRequest) []attribute.KeyValue {
+	var p params
+	p.str(OutputType, OutputTypeImage)
+	p.stream(req.Stream)
+	return p.attrs
+}
+
+// speechRequestAttrs records the requested output modality. Speech streams when
+// stream_format is "sse".
+func speechRequestAttrs(req *openai.SpeechRequest) []attribute.KeyValue {
+	var p params
+	p.str(OutputType, OutputTypeSpeech)
+	p.stream(req.StreamFormat != nil && *req.StreamFormat == "sse")
+	return p.attrs
 }
