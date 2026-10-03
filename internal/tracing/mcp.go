@@ -97,7 +97,7 @@ func (s mcpSpan) RecordToolCallResult(resultJSON []byte) {
 // EndSpanOnError implements [tracingapi.MCPSpan.EndSpanOnError].
 func (s mcpSpan) EndSpanOnError(errType string, err error) {
 	s.vocab.requestError(s.span, errType, err)
-	var exceptionType = errType
+	exceptionType := errType
 	exceptionMessage := err.Error()
 	if s.vocab.name == "gen_ai" {
 		var toolErr interface{ IsMCPToolError() bool }

@@ -454,8 +454,10 @@ func TestMCPTracer_StaticAttributes(t *testing.T) {
 	require.Contains(t, attrs, attribute.String("jsonrpc.request.id", "test-id"))
 	// Values the gateway cannot know are not reported.
 	for _, a := range attrs {
-		require.NotContains(t, []string{"mcp.protocol.version", "network.transport", "network.protocol.name",
-			"network.protocol.version", "server.address", "server.port"}, string(a.Key))
+		require.NotContains(t, []string{
+			"mcp.protocol.version", "network.transport", "network.protocol.name",
+			"network.protocol.version", "server.address", "server.port",
+		}, string(a.Key))
 	}
 	// The legacy custom keys must be gone.
 	for _, a := range attrs {
