@@ -5,7 +5,9 @@
 
 package metrics
 
-import "go.opentelemetry.io/otel/metric"
+import (
+	"go.opentelemetry.io/otel/metric"
+)
 
 const (
 	// Metric names, attributes and values according to the Semantic Conventions for Generative AI Metrics.
@@ -16,14 +18,29 @@ const (
 	genaiMetricServerTimeToFirstToken   = "gen_ai.server.time_to_first_token"   //nolint:gosec // metric name, not credential
 	genaiMetricServerTimePerOutputToken = "gen_ai.server.time_per_output_token" //nolint:gosec // metric name, not credential
 
-	genaiAttributeOperationName = "gen_ai.operation.name"
-	genaiAttributeProviderName  = "gen_ai.provider.name"
-	genaiAttributeOriginalModel = "gen_ai.original.model"
-	genaiAttributeRequestModel  = "gen_ai.request.model"
-	genaiAttributeResponseModel = "gen_ai.response.model"
-	genaiAttributeTokenType     = "gen_ai.token.type" //nolint:gosec // metric name, not credential
-	genaiAttributeErrorType     = "error.type"
-	genaiAttributeBackend       = "gen_ai.backend"
+	// Current client-side GenAI metrics.
+	// See: https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-metrics.md
+	// and https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-token-metrics.md
+	genaiMetricClientOperationDuration     = "gen_ai.client.operation.duration"
+	genaiMetricClientTimeToFirstChunk      = "gen_ai.client.operation.time_to_first_chunk"
+	genaiMetricClientTimePerOutputChunk    = "gen_ai.client.operation.time_per_output_chunk"
+	genaiMetricClientInputTokensUsage      = "gen_ai.client.inference.usage.input_tokens"             //nolint:gosec // metric name
+	genaiMetricClientOutputTokensUsage     = "gen_ai.client.inference.usage.output_tokens"            //nolint:gosec // metric name
+	genaiMetricClientCacheReadInputTokens  = "gen_ai.client.inference.usage.cache_read.input_tokens"  //nolint:gosec // metric name
+	genaiMetricClientCacheWriteInputTokens = "gen_ai.client.inference.usage.cache_write.input_tokens" //nolint:gosec // metric name
+	genaiMetricClientReasoningOutputTokens = "gen_ai.client.inference.usage.reasoning.output_tokens"  //nolint:gosec // metric name
+	genaiMetricClientOperationInputTokens  = "gen_ai.client.inference.operation.input_tokens"         //nolint:gosec // metric name
+	genaiMetricClientOperationOutputTokens = "gen_ai.client.inference.operation.output_tokens"        //nolint:gosec // metric name
+	genaiAttributeTokenModality            = "gen_ai.token.modality"                                  //nolint:gosec // attribute name
+	genaiTokenModalityUnknown              = "unknown"
+	genaiAttributeOperationName            = "gen_ai.operation.name"
+	genaiAttributeProviderName             = "gen_ai.provider.name"
+	genaiAttributeOriginalModel            = "gen_ai.original.model"
+	genaiAttributeRequestModel             = "gen_ai.request.model"
+	genaiAttributeResponseModel            = "gen_ai.response.model"
+	genaiAttributeTokenType                = "gen_ai.token.type" //nolint:gosec // metric name, not credential
+	genaiAttributeErrorType                = "error.type"
+	genaiAttributeBackend                  = "gen_ai.backend"
 
 	GenAIOperationChat                 GenAIOperation = "chat"
 	GenAIOperationCompletion           GenAIOperation = "completion"
@@ -88,11 +105,89 @@ type genAI struct {
 	// Calculated by: (request_duration - time_to_first_token) / (output_tokens - 1)
 	// See: https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-metrics/#metric-gen_aiservertime_per_output_token
 	outputTokenLatency metric.Float64Histogram
+
+	// Current semconv client-side metrics (see constants above).
+	clientOperationDuration   metric.Float64Histogram
+	clientTimeToFirstChunk    metric.Float64Histogram
+	clientTimePerOutputChunk  metric.Float64Histogram
+	clientInputTokens         metric.Int64Counter
+	clientOutputTokens        metric.Int64Counter
+	clientCacheReadTokens     metric.Int64Counter
+	clientCacheWriteTokens    metric.Int64Counter
+	clientReasoningTokens     metric.Int64Counter
+	clientOperationInputToks  metric.Float64Histogram
+	clientOperationOutputToks metric.Float64Histogram
+}
+
+func mustRegisterInt64Counter(meter metric.Meter, name, desc string) metric.Int64Counter {
+	c, err := meter.Int64Counter(name, metric.WithDescription(desc), metric.WithUnit("{token}"))
+	if err != nil {
+		panic(err)
+	}
+	return c
+}
+
+// normalizeClientOperation maps a gateway operation to a gen_ai.operation.name well-known value for the
+// current client metrics. Operations without a predefined value keep their custom name, which the spec allows.
+func normalizeClientOperation(op string) string {
+	switch GenAIOperation(op) {
+	case GenAIOperationChat, GenAIOperationMessages, GenAIOperationResponses:
+		return "chat"
+	case GenAIOperationCompletion:
+		return "text_completion"
+	default:
+		return op
+	}
+}
+
+// operationReportsTokens reports whether the operation performs inference that consumes tokens. Token counting
+// endpoints do not, and the spec says not to report usage for them.
+func operationReportsTokens(op string) bool {
+	switch GenAIOperation(op) {
+	case GenAIOperationCountTokens, GenAIOperationResponsesInputTokens, GenAIOperationTokenize:
+		return false
+	}
+	return true
+}
+
+// normalizeClientProvider maps the legacy gen_ai.provider.name value to a well-known semconv provider value.
+// Providers hosting another vendor's models use the discriminator of the hosting API format.
+func normalizeClientProvider(legacy string) string {
+	switch legacy {
+	case genaiProviderAzureOpenAI:
+		return "azure.ai.openai"
+	case genaiProviderAWSAnthropic:
+		return "aws.bedrock"
+	case genaiProviderGCPAnthropic:
+		return "gcp.vertex_ai"
+	default:
+		return legacy
+	}
 }
 
 // newGenAI creates a new genAI metrics instance.
 func newGenAI(meter metric.Meter) *genAI {
+	durationBuckets := metric.WithExplicitBucketBoundaries(0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 1.28, 2.56, 5.12, 10.24, 20.48, 40.96, 81.92)
+	tokenBuckets := metric.WithExplicitBucketBoundaries(1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216, 67108864)
 	return &genAI{
+		clientOperationDuration: mustRegisterHistogram(meter, genaiMetricClientOperationDuration,
+			metric.WithDescription("GenAI operation duration."), metric.WithUnit("s"), durationBuckets),
+		clientTimeToFirstChunk: mustRegisterHistogram(meter, genaiMetricClientTimeToFirstChunk,
+			metric.WithDescription("Time to receive the first chunk in a streaming response."), metric.WithUnit("s"), durationBuckets),
+		clientTimePerOutputChunk: mustRegisterHistogram(meter, genaiMetricClientTimePerOutputChunk,
+			metric.WithDescription("Time per output chunk, recorded for each chunk received after the first one."), metric.WithUnit("s"), durationBuckets),
+		clientInputTokens:  mustRegisterInt64Counter(meter, genaiMetricClientInputTokensUsage, "The number of input (prompt) tokens used, including cached tokens."),
+		clientOutputTokens: mustRegisterInt64Counter(meter, genaiMetricClientOutputTokensUsage, "The number of output (completion) tokens used, including reasoning tokens."),
+		clientCacheReadTokens: mustRegisterInt64Counter(meter, genaiMetricClientCacheReadInputTokens,
+			"The number of input tokens served from a provider-managed cache."),
+		clientCacheWriteTokens: mustRegisterInt64Counter(meter, genaiMetricClientCacheWriteInputTokens,
+			"The number of input tokens written to a provider-managed cache."),
+		clientReasoningTokens: mustRegisterInt64Counter(meter, genaiMetricClientReasoningOutputTokens,
+			"The number of output tokens used for reasoning."),
+		clientOperationInputToks: mustRegisterHistogram(meter, genaiMetricClientOperationInputTokens,
+			metric.WithDescription("The number of input (prompt) tokens used per inference operation."), metric.WithUnit("{token}"), tokenBuckets),
+		clientOperationOutputToks: mustRegisterHistogram(meter, genaiMetricClientOperationOutputTokens,
+			metric.WithDescription("The number of output (completion) tokens used per inference operation."), metric.WithUnit("{token}"), tokenBuckets),
 		tokenUsage: mustRegisterHistogram(meter,
 			genaiMetricClientTokenUsage,
 			metric.WithDescription("Number of tokens processed."),

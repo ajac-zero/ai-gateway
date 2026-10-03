@@ -25,6 +25,7 @@ func anthropicRequestAttrs(req *anthropicschema.MessagesRequest) []attribute.Key
 	p.float64(RequestTemperature, req.Temperature)
 	p.float64(RequestTopP, req.TopP)
 	p.int(RequestTopK, req.TopK)
+	p.stream(req.Stream)
 	if req.MaxTokens > 0 {
 		p.attrs = append(p.attrs, attribute.Int64(RequestMaxTokens, int64(req.MaxTokens)))
 	}
@@ -36,7 +37,7 @@ func anthropicRequestAttrs(req *anthropicschema.MessagesRequest) []attribute.Key
 func anthropicResponseAttrs(resp *anthropicschema.MessagesResponse) []attribute.KeyValue {
 	attrs := responseIdentityAttrs(resp.ID, resp.Model)
 	if u := resp.Usage; u != nil {
-		attrs = append(attrs, usageAttrs(int(u.InputTokens), int(u.OutputTokens))...)
+		attrs = append(attrs, usageAttrs(int(u.InputTokens+u.CacheReadInputTokens+u.CacheCreationInputTokens), int(u.OutputTokens))...)
 		attrs = append(attrs, usageDetailAttrs(
 			int(u.CacheReadInputTokens), int(u.CacheCreationInputTokens), 0)...)
 	}

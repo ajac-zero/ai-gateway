@@ -59,6 +59,10 @@ func (e *errToolCall) Unwrap() error {
 	return e.err
 }
 
+// IsMCPToolError marks an application-level tool failure for OTel MCP
+// instrumentation without exposing the tool's returned content as an error.
+func (*errToolCall) IsMCPToolError() bool { return true }
+
 // checkToolCallError examines a tools/call response and creates a structured error if isError is true.
 // It extracts the tool name from the request params and the error content from the tool result.
 // Returns nil if the response is not a tools/call error.
@@ -1013,7 +1017,11 @@ func (m *mcpRequestContext) maybeServerToClientRequestModify(ctx context.Context
 // message-content capture opt-in, so this is a no-op for other methods, a nil
 // span, or an error response.
 func recordToolCallResult(span tracingapi.MCPSpan, req *jsonrpc.Request, msg *jsonrpc.Response) {
-	if span == nil || req == nil || req.Method != "tools/call" || msg.Result == nil {
+	if span == nil || req == nil || req.Method != "tools/call" || msg.Error != nil || msg.Result == nil {
+		return
+	}
+	var result mcp.CallToolResult
+	if err := json.Unmarshal(msg.Result, &result); err == nil && result.IsError {
 		return
 	}
 	span.RecordToolCallResult(msg.Result)
@@ -1364,7 +1372,12 @@ func copyProxyHeaders(resp *http.Response, w http.ResponseWriter) {
 
 // invokeAndProxyResponse invokes the given JSON-RPC request to the given backend and proxies the response back to the client
 // via w ResponseWriter.
-func (m *mcpRequestContext) invokeAndProxyResponse(ctx context.Context, s *session, w http.ResponseWriter, backend filterapi.MCPBackend, sess *compositeSessionEntry, req *jsonrpc.Request, params mcp.Params, span tracingapi.MCPSpan) error {
+func (m *mcpRequestContext) invokeAndProxyResponse(ctx context.Context, s *session, w http.ResponseWriter, backend filterapi.MCPBackend, sess *compositeSessionEntry, req *jsonrpc.Request, params mcp.Params, span tracingapi.MCPSpan) (retErr error) {
+	opStartAt := time.Now()
+	defer func() {
+		m.recordClientOperation(ctx, backend.Name, opStartAt, req.Method, params, retErr)
+	}()
+
 	resp, err := m.invokeJSONRPCRequest(ctx, s.route, backend, sess, req, params)
 	if err != nil {
 		onErrorResponse(w, http.StatusInternalServerError, fmt.Sprintf("call to %s failed: %v", backend.Name, err))
@@ -1434,6 +1447,7 @@ func sendToAllBackendsAndAggregateResponsesImpl[responseType any, paramsType mcp
 					// Record per-backend error metrics.
 					backendMetrics.RecordMethodErrorCount(ctx, request.Method, params, metrics.MCPStatusError)
 					backendMetrics.RecordRequestErrorDuration(ctx, event.startAt, metrics.MCPErrorInternal, params)
+					m.recordClientOperation(ctx, event.backend, event.startAt, request.Method, params, respMsg.Error)
 				case respMsg.Result != nil: // Empty result is valid, for example set/loggingLevel returns empty result from some backends.
 					var result responseType
 					if err := json.Unmarshal(respMsg.Result, &result); err != nil {
@@ -1443,11 +1457,13 @@ func sendToAllBackendsAndAggregateResponsesImpl[responseType any, paramsType mcp
 						// Record per-backend error metrics for unmarshal failure.
 						backendMetrics.RecordMethodErrorCount(ctx, request.Method, params, metrics.MCPStatusError)
 						backendMetrics.RecordRequestErrorDuration(ctx, event.startAt, metrics.MCPErrorInternal, params)
+						m.recordClientOperation(ctx, event.backend, event.startAt, request.Method, params, err)
 					} else {
 						responses = append(responses, broadCastResponse[responseType]{backendName: event.backend, res: result})
 						// Record per-backend success metrics.
 						backendMetrics.RecordMethodCount(ctx, request.Method, params)
 						backendMetrics.RecordRequestDuration(ctx, event.startAt, params)
+						m.recordClientOperation(ctx, event.backend, event.startAt, request.Method, params, nil)
 					}
 				}
 				// Regardless of whether it's error or success response, we need to remove it from the event messages so that

@@ -83,25 +83,26 @@ func TestEndpointCoverage(t *testing.T) {
 			},
 		},
 		{
-			// TODO: input messages and streaming chunks are not mapped yet.
+			// TODO: input messages are not mapped yet.
 			name:   "responses",
 			actual: coverageOf(t, NewResponsesRecorder(cfg)),
 			expected: coverage{
 				requestAttrs: true, responseAttrs: true,
 				outputMessages: true, systemInstructions: true, conversationID: true,
+				foldChunks: true,
 			},
 		},
 		{
-			// The conventions define no image generation attributes beyond the core set.
+			// Only the requested output type and streaming mode are defined.
 			name:     "imageGeneration",
 			actual:   coverageOf(t, NewImageGenerationRecorder(cfg)),
-			expected: coverage{},
+			expected: coverage{requestAttrs: true},
 		},
 		{
-			// The conventions define no speech attributes beyond the core set.
+			// Only the requested output type and streaming mode are defined.
 			name:     "speech",
 			actual:   coverageOf(t, NewSpeechRecorder(cfg)),
-			expected: coverage{},
+			expected: coverage{requestAttrs: true},
 		},
 		{
 			// The conventions define no transcription attributes beyond the core set.
