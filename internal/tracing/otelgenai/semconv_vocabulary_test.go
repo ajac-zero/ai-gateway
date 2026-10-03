@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
 	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
 )
 
@@ -96,8 +97,8 @@ func TestProviders_matchSemconv(t *testing.T) {
 	require.Equal(t, semconv.GenAIProviderNameGCPVertexAI.Value.AsString(), string(ProviderGCPVertexAI))
 	require.Equal(t, semconv.GenAIProviderNameAnthropic.Value.AsString(), string(ProviderAnthropic))
 	require.Equal(t, semconv.GenAIProviderNameCohere.Value.AsString(), string(ProviderCohere))
-	require.Equal(t, semconv.GenAIOutputTypeJSON.Value.AsString(), OutputTypeJSON)
-	require.Equal(t, semconv.GenAIOutputTypeText.Value.AsString(), OutputTypeText)
-	require.Equal(t, semconv.GenAIOutputTypeImage.Value.AsString(), OutputTypeImage)
-	require.Equal(t, semconv.GenAIOutputTypeSpeech.Value.AsString(), OutputTypeSpeech)
+	require.Equal(t, attribute.StringValue(OutputTypeJSON), semconv.GenAIOutputTypeJSON.Value)
+	require.Equal(t, attribute.StringValue(OutputTypeText), semconv.GenAIOutputTypeText.Value)
+	require.Equal(t, attribute.StringValue(OutputTypeImage), semconv.GenAIOutputTypeImage.Value)
+	require.Equal(t, attribute.StringValue(OutputTypeSpeech), semconv.GenAIOutputTypeSpeech.Value)
 }
