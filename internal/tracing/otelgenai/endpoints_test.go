@@ -103,10 +103,10 @@ func TestDecisionsRecorder_RecordResponse(t *testing.T) {
 		attribute.Int(UsageInputTokens, 100),
 		attribute.Int(UsageOutputTokens, 50),
 		attribute.Int(UsageCacheReadInputTokens, 80),
-		attribute.Int(UsageCacheCreationInputTokens, 20),
+		attribute.Int(UsageCacheWriteInputTokens, 20),
 		attribute.Int(UsageReasoningOutputTokens, 30),
 	}, span.Attributes)
-	require.Equal(t, codes.Ok, span.Status.Code)
+	require.Equal(t, codes.Unset, span.Status.Code)
 }
 
 // TestChatCompletionRecorder_RecordRequest_noContentByDefault pins that the raw
