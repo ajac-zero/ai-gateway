@@ -165,30 +165,30 @@ func TestCompletionRequestAttrs(t *testing.T) {
 
 func TestUsageDetailAttrs(t *testing.T) {
 	tests := []struct {
-		name                                string
-		cacheRead, cacheCreation, reasoning int
-		expected                            []attribute.KeyValue
+		name                             string
+		cacheRead, cacheWrite, reasoning int
+		expected                         []attribute.KeyValue
 	}{
 		{name: "all absent", expected: nil},
 		{
-			name: "all present", cacheRead: 10, cacheCreation: 5, reasoning: 3,
+			name: "all present", cacheRead: 10, cacheWrite: 5, reasoning: 3,
 			expected: []attribute.KeyValue{
 				attribute.Int(UsageCacheReadInputTokens, 10),
-				attribute.Int(UsageCacheCreationInputTokens, 5),
+				attribute.Int(UsageCacheWriteInputTokens, 5),
 				attribute.Int(UsageReasoningOutputTokens, 3),
 			},
 		},
 		{
-			name: "zero counts are omitted", cacheRead: 0, cacheCreation: 5, reasoning: 0,
+			name: "zero counts are omitted", cacheRead: 0, cacheWrite: 5, reasoning: 0,
 			expected: []attribute.KeyValue{
-				attribute.Int(UsageCacheCreationInputTokens, 5),
+				attribute.Int(UsageCacheWriteInputTokens, 5),
 			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.expected, usageDetailAttrs(tc.cacheRead, tc.cacheCreation, tc.reasoning))
+			require.Equal(t, tc.expected, usageDetailAttrs(tc.cacheRead, tc.cacheWrite, tc.reasoning))
 		})
 	}
 }
@@ -240,7 +240,7 @@ func TestChatCompletionRecorder_usageDetails(t *testing.T) {
 		attribute.Int(UsageInputTokens, 100),
 		attribute.Int(UsageOutputTokens, 50),
 		attribute.Int(UsageCacheReadInputTokens, 80),
-		attribute.Int(UsageCacheCreationInputTokens, 20),
+		attribute.Int(UsageCacheWriteInputTokens, 20),
 		attribute.Int(UsageReasoningOutputTokens, 30),
 	}, span.Attributes)
 }

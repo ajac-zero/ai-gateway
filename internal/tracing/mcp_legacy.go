@@ -26,6 +26,7 @@ import (
 func mcpVocabularyLegacy() *mcpVocabulary {
 	return &mcpVocabulary{
 		name:              "openinference",
+		successStatus:     true,
 		spanName:          legacyMCPSpanName,
 		requestAttributes: legacyMCPRequestAttributes,
 		routeToBackend: func(span trace.Span, backend, sessionID string, isNew bool) {
