@@ -7,6 +7,7 @@ package tracing
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -57,6 +58,9 @@ type mcpVocabulary struct {
 	// status and the exception event are the same under both conventions, so
 	// this covers only the convention-specific attributes.
 	requestError func(span trace.Span, errType string, err error)
+	// successStatus preserves the legacy vocabulary's explicit OK status. The
+	// OTel conventions leave successful span status unset.
+	successStatus bool
 }
 
 // mcpSpan is an implementation of [tracingapi.MCPSpan].
@@ -93,17 +97,28 @@ func (s mcpSpan) RecordToolCallResult(resultJSON []byte) {
 // EndSpanOnError implements [tracingapi.MCPSpan.EndSpanOnError].
 func (s mcpSpan) EndSpanOnError(errType string, err error) {
 	s.vocab.requestError(s.span, errType, err)
+	var exceptionType = errType
+	exceptionMessage := err.Error()
+	if s.vocab.name == "gen_ai" {
+		var toolErr interface{ IsMCPToolError() bool }
+		if errors.As(err, &toolErr) && toolErr.IsMCPToolError() {
+			exceptionType = "tool_error"
+			exceptionMessage = "tool_error"
+		}
+	}
 	s.span.AddEvent("exception", trace.WithAttributes(
-		attribute.String("exception.type", errType),
-		attribute.String("exception.message", err.Error()),
+		attribute.String("exception.type", exceptionType),
+		attribute.String("exception.message", exceptionMessage),
 	))
-	s.span.SetStatus(codes.Error, err.Error())
+	s.span.SetStatus(codes.Error, exceptionMessage)
 	s.span.End()
 }
 
 // EndSpan implements [tracingapi.MCPSpan.EndSpan].
 func (s mcpSpan) EndSpan() {
-	s.span.SetStatus(codes.Ok, "")
+	if s.vocab.successStatus {
+		s.span.SetStatus(codes.Ok, "")
+	}
 	s.span.End()
 }
 
