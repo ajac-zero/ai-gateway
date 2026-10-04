@@ -4,7 +4,7 @@
 # the root of the repo.
 
 [upstream]
-url = "https://github.com/envoyproxy/ai-gateway.git"
+url = "https://github.com/theagentrouter/agent-router.git"
 
 [fork]
 mirror_branch = "main"
