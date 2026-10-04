@@ -1,6 +1,6 @@
 # Fork conventions
 
-This checkout is a fork of [envoyproxy/ai-gateway](https://github.com/envoyproxy/ai-gateway). `fork/main` is generated: it merges upstream `main` with every `patch/*` and `tooling/*` series and every `glue/*` integration merge. Orbs and Ship start from `fork/main`. Every change ends up in one of those series. The engine is jj-fork; `.jj-fork.toml` holds its checks.
+This checkout is a fork of [theagentrouter/agent-router](https://github.com/theagentrouter/agent-router) (renamed from envoyproxy/ai-gateway; the old URL redirects). `fork/main` is generated: it merges upstream `main` with every `patch/*` and `tooling/*` series and every `glue/*` integration merge. Orbs and Ship start from `fork/main`. Every change ends up in one of those series. The engine is jj-fork; `.jj-fork.toml` holds its checks.
 
 - Load the `maintaining-forks-with-jj-fork` skill (`jj fork skill maintaining-forks-with-jj-fork`) before any version-control work: committing, creating or moving bookmarks, rebasing, pushing, or shipping. Use `jj`, not Git, to change history. Never commit onto `fork/main` or `main`.
 - Plain feature work needs no setup. Edit the working copy and verify as usual. The Ship button turns the result into a series (`.agents/ship.md`).
