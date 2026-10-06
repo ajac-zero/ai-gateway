@@ -13,8 +13,8 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 JJ_VERSION="0.43.0"
-JJ_FORK_VERSION="0.2.7"
-JJ_FORK_SHA256="4d132c4a7efb8487d9079b1c29b26a14cb65fa0e523fbb8c167ff7bd1875c524" # x86_64-unknown-linux-gnu
+JJ_FORK_VERSION="0.2.9"
+JJ_FORK_SHA256="4fd2f99fcbfddfffbbede8618bec41593d57b332eae1544be89a457c02322a93" # x86_64-unknown-linux-gnu
 GO_VERSION="$(awk '$1 == "go" { print $2; exit }' go.mod)"
 prefix="$HOME/.local"
 mkdir -p "$prefix/bin"
