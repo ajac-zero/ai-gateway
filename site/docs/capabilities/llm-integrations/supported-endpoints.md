@@ -4,11 +4,11 @@ title: Supported API Endpoints
 sidebar_position: 9
 ---
 
-The Agent Router provides OpenAI-compatible API endpoints as well as the Anthropic-compatible API for routing and managing LLM/AI traffic. This page documents which OpenAI API endpoints and Anthropic-compatible API endpoints are currently supported and their capabilities.
+The Agent Router provides OpenAI-compatible API endpoints, the Anthropic-compatible API, and the native Gemini API for routing and managing LLM/AI traffic. This page documents which endpoints are currently supported and their capabilities.
 
 ## Overview
 
-The Agent Router acts as a proxy that accepts OpenAI-compatible and Anthropic-compatible requests and routes them to various AI providers. While it maintains compatibility with the OpenAI API specification, it currently supports a subset of the full OpenAI API.
+The Agent Router acts as a proxy that accepts OpenAI-compatible, Anthropic-compatible, and native Gemini API requests and routes them to various AI providers. While it maintains compatibility with these API specifications, it currently supports a subset of each full API.
 
 ## Supported Endpoints
 
@@ -227,6 +227,18 @@ curl -H "Content-Type: application/json" \
 
 - OpenAI
 - Any OpenAI-compatible provider that supports image generations
+- Google AI Studio (native Gemini `generateContent`), via the `GoogleAIStudio` backend schema. The Gemini image bytes returned as `inlineData` are base64-encoded into the OpenAI `b64_json` field.
+- GCP Vertex AI Gemini image models, such as `gemini-2.5-flash-image` (with automatic translation; see below)
+
+**GCP Vertex AI translation:**
+
+Requests to a GCP Vertex AI backend are translated to the Gemini `generateContent` method with `responseModalities: ["TEXT", "IMAGE"]`. Each generated image is returned as `b64_json`.
+
+- `size` selects a Gemini aspect ratio (`1:1`, `2:3`, `3:2`, `3:4`, `4:3`, `4:5`, `5:4`, `9:16`, `16:9`, or `21:9`) when it is within 3% of one. For example, `1536x1024` becomes `3:2` and `1792x1024` becomes `16:9`. The model chooses the pixel resolution, and the response `size` reports the dimensions it generated. `auto` or no size lets the model choose the aspect ratio. Other sizes, such as `4000x1000`, are rejected.
+- `output_format` (`png`, `jpeg`, or `webp`) and `output_compression` are sent as `imageConfig.imageOutputOptions`. If Vertex AI returns a different format than requested, the gateway returns `502 Bad Gateway`.
+- Parameters that Gemini cannot honor are rejected with `422 Unprocessable Entity` instead of being ignored: `n` greater than `1`, `response_format: url`, `stream`, `partial_images`, `style`, and any `quality`, `background`, or `moderation` other than `auto`. `user` is ignored, because it does not affect the generated image.
+- If Vertex AI responds without an image, the gateway returns an OpenAI error instead of an empty `data` list: `400 Bad Request` with type `content_policy_violation` when a safety filter blocked the prompt or the image, and `502 Bad Gateway` otherwise, such as for a text-only answer. The error message includes the Gemini finish reason and any text the model returned.
+- Token usage comes from the Gemini `usageMetadata`; output tokens include thinking tokens, and `input_tokens_details` splits prompt tokens into text and image tokens.
 
 **Example:**
 
@@ -328,9 +340,24 @@ curl -F "model=whisper-1" \
 
 - OpenAI
 - Azure OpenAI with an API version that supports Responses, such as `2025-04-01-preview`
+- GCP Vertex AI (Gemini models, with automatic translation; see the limitations below)
 - Anthropic (with automatic translation to the Messages API)
 - GCP Anthropic (with automatic translation to the Messages API)
 - Any OpenAI-compatible provider (Groq, Together AI, Mistral, Tetrate Agent Router Service, etc.)
+
+**GCP Vertex AI translation:**
+
+Requests to a GCP Vertex AI backend are translated to the Gemini `generateContent` and `streamGenerateContent` methods. Streaming responses use the standard Responses event sequence (`response.created`, `response.output_item.added`, `response.output_text.delta`, `response.function_call_arguments.delta`, `response.completed`, and so on).
+
+- ✅ String and message-list input, including multi-turn conversations, `instructions`, and `system` or `developer` messages
+- ✅ Image inputs (`input_image` URLs and data URLs) and file inputs (`input_file` URLs and inline data)
+- ✅ Function tools, `tool_choice` (`auto`, `none`, `required`, a named function, or `allowed_tools`), and `function_call` / `function_call_output` items
+- ✅ `reasoning.effort` mapped to a Gemini thinking level (Gemini 3) or thinking budget (earlier models) following [Google's OpenAI compatibility table](https://ai.google.dev/gemini-api/docs/openai#thinking); `reasoning.summary` returns Gemini thoughts as reasoning summaries
+- ✅ Gemini thought signatures are returned as `encrypted_content` on reasoning items. Send reasoning items back in `input` to keep multi-turn function calling working on Gemini 3 models.
+- ✅ `temperature`, `top_p`, `max_output_tokens`, `presence_penalty`, `frequency_penalty`, and `text.format` (`json_object` and `json_schema`)
+- ✅ Token usage, including cached and reasoning tokens
+
+Vertex AI is stateless and does not run OpenAI built-in tools, so the gateway returns `422 Unprocessable Entity` for features it cannot honor: `previous_response_id`, `conversation`, `store: true`, `background: true`, prompt templates, `context_management`, `truncation: auto`, `service_tier` values other than `auto` or `default`, `top_logprobs`, `text.verbosity` other than `medium`, `include` values other than `reasoning.encrypted_content`, `parallel_tool_calls: false` with tools, OpenAI built-in, MCP, and custom tools, OpenAI file IDs, and input items produced by built-in tools.
 
 **Translation to Anthropic:**
 
@@ -613,6 +640,78 @@ For OpenAI-compatible backends that natively support tokenization (e.g., vLLM), 
 - For **AWS Bedrock**: Configure with `AWSBedrock` schema. Requests are translated to the AWS Bedrock CountTokens API using the Converse-style input. Completion prompts are automatically converted to chat messages. Cross-region inference (CRIS) model ID prefixes are automatically stripped.
 - For **AWS Bedrock (Anthropic)**: Configure with `AWSAnthropic` schema. Requests are translated to the AWS Bedrock CountTokens API using the InvokeModel-style Anthropic Messages body. Completion prompts are automatically converted to chat messages. Cross-region inference (CRIS) model ID prefixes are automatically stripped.
 
+### Gemini Generate Content
+
+**Endpoint:** `POST /v1beta/models/{model}:generateContent`
+
+**Status:** ✅ Fully Supported
+
+**Description:** Generate content using the native Gemini API format. Clients such as Gemini CLI or the Google Generative AI SDK that target the Gemini API directly (not the OpenAI-compatible shim) can be pointed at the gateway without modification.
+
+**Features:**
+
+- ✅ Non-streaming responses
+- ✅ Function calling
+- ✅ Token usage tracking and cost calculation
+- ✅ System instructions
+- ✅ Safety settings and provider-specific fields
+- ✅ Model selection from URL path
+
+**Supported Providers:**
+
+- Google Vertex AI (with automatic path rewriting)
+
+**Example:**
+
+```bash
+curl -s -H "Content-Type: application/json" \
+  -d '{
+    "contents": [
+      {
+        "role": "user",
+        "parts": [{"text": "Hello, how are you?"}]
+      }
+    ]
+  }' \
+  $GATEWAY_URL/v1beta/models/gemini-3-flash-preview:generateContent
+```
+
+### Gemini Stream Generate Content
+
+**Endpoint:** `POST /v1beta/models/{model}:streamGenerateContent`
+
+**Status:** Supported for native passthrough to Google Vertex AI
+
+**Description:** Stream generated content using the native Gemini API format. Returns Server-Sent Events (SSE).
+
+**Features:**
+
+- ✅ Streaming responses (SSE)
+- ✅ Native request and response preservation, including function calling
+- ✅ Token usage tracking and cost calculation
+- ✅ System instructions
+- ✅ Safety settings and provider-specific fields
+- ✅ Model selection from URL path
+
+**Supported Providers:**
+
+- Google Vertex AI (with automatic path rewriting)
+
+**Example:**
+
+```bash
+curl -s -H "Content-Type: application/json" \
+  -d '{
+    "contents": [
+      {
+        "role": "user",
+        "parts": [{"text": "Tell me a story."}]
+      }
+    ]
+  }' \
+  $GATEWAY_URL/v1beta/models/gemini-3-flash-preview:streamGenerateContent
+```
+
 ### Models
 
 **Endpoint:** `GET /v1/models`
@@ -657,6 +756,7 @@ The following table summarizes which providers support which endpoints:
 | [AWS Bedrock](https://docs.aws.amazon.com/bedrock/latest/APIReference/)                               |        ✅        |     🚧      |     ✅     |        ❌        |         ❌         |      ❌      |   ❌   |     ❌     |    ❌    | Via API translation (embeddings: Titan models only)                                                                  |
 | [Azure OpenAI](https://learn.microsoft.com/en-us/azure/ai-services/openai/reference)                  |        ✅        |     🚧      |     ✅     |        ❌        |         ⚠️         |      ❌      |   ❌   |     ❌     |    ❌    | Via API translation or via [OpenAI-compatible API](https://learn.microsoft.com/en-us/azure/ai-foundry/openai/latest) |
 | [Google Gemini](https://ai.google.dev/gemini-api/docs/openai)                                         |        ✅        |     ⚠️      |     ✅     |        ⚠️        |         ❌         |      ❌      |   ❌   |     ❌     |    ❌    | Via OpenAI-compatible API                                                                                            |
+| [Google AI Studio (native)](https://ai.google.dev/api/rest)                                           |        ❌        |     ❌      |     ❌     |        ⚠️        |         ❌         |      ❌      |   ❌   |     ❌     |    ❌    | Native `generateContent` via `GoogleAIStudio` schema; image generation only                                          |
 | [Groq](https://console.groq.com/docs/openai)                                                          |        ✅        |     ❌      |     ❌     |        ❌        |         ❌         |      ❌      |   ❌   |     ❌     |    ❌    | Via OpenAI-compatible API                                                                                            |
 | [Grok](https://docs.x.ai/docs/api-reference)                                                          |        ✅        |     ⚠️      |     ❌     |        ⚠️        |         ❌         |      ❌      |   ❌   |     ❌     |    ❌    | Via OpenAI-compatible API                                                                                            |
 | [Together AI](https://docs.together.ai/docs/openai-api-compatibility)                                 |        ⚠️        |     ⚠️      |     ⚠️     |        ⚠️        |         ❌         |      ❌      |   ❌   |     ❌     |    ❌    | Via OpenAI-compatible API                                                                                            |
@@ -668,7 +768,7 @@ The following table summarizes which providers support which endpoints:
 | [Hunyuan](https://cloud.tencent.com/document/product/1729/111007)                                     |        ⚠️        |     ⚠️      |     ⚠️     |        ❌        |         ❌         |      ❌      |   ❌   |     ❌     |    ❌    | Via OpenAI-compatible API                                                                                            |
 | [Tencent LLM Knowledge Engine](https://www.tencentcloud.com/document/product/1255/70381)              |        ⚠️        |     ❌      |     ❌     |        ❌        |         ❌         |      ❌      |   ❌   |     ❌     |    ❌    | Via OpenAI-compatible API                                                                                            |
 | [Tetrate Agent Router Service (TARS)](https://router.tetrate.ai/)                                     |        ⚠️        |     ⚠️      |     ⚠️     |        ❌        |         ❌         |      ❌      |   ❌   |     ❌     |    ❌    | Via OpenAI-compatible API                                                                                            |
-| [Google Vertex AI](https://cloud.google.com/vertex-ai/docs/reference/rest)                            |        ✅        |     🚧      |     ✅     |        ❌        |         ❌         |      ❌      |   ❌   |     ❌     |    ✅    | Via API translation                                                                                                  |
+| [Google Vertex AI](https://cloud.google.com/vertex-ai/docs/reference/rest)                            |        ✅        |     🚧      |     ✅     |        ✅        |         ❌         |      ❌      |   ❌   |     ❌     |    ✅    | Via API translation                                                                                                  |
 | [Anthropic on Vertex AI](https://cloud.google.com/vertex-ai/generative-ai/docs/partner-models/claude) |        ✅        |     ❌      |     🚧     |        ❌        |         ✅         |      ✅      |   ❌   |     ❌     |    ✅    | Via API translation                                                                                                  |
 | [Anthropic on AWS Bedrock](https://aws.amazon.com/bedrock/anthropic/)                                 |        🚧        |     ❌      |     ❌     |        ❌        |         ✅         |      ✅      |   ❌   |     ❌     |    ✅    | Native Anthropic API                                                                                                 |
 | [SambaNova](https://docs.sambanova.ai/sambastudio/latest/open-ai-api.html)                            |        ✅        |     ⚠️      |     ✅     |        ❌        |         ❌         |      ❌      |   ❌   |     ❌     |    ❌    | Via OpenAI-compatible API                                                                                            |

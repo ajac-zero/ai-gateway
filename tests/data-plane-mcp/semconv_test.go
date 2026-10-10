@@ -37,9 +37,11 @@ func TestMCPTracing_OTelSemConv(t *testing.T) {
 		require.Equal(t, "tools/list", span.Name)
 		attrs := otelSpanAttributes(t, span)
 		require.Equal(t, "tools/list", attrs["mcp.method.name"])
-		require.Equal(t, "tcp", attrs["network.transport"])
-		require.Equal(t, "http", attrs["network.protocol.name"])
-		require.Equal(t, "1.1", attrs["network.protocol.version"])
+		// Transport and protocol details for the client connection are not
+		// reliably available at this instrumentation point, so do not guess them.
+		require.NotContains(t, attrs, "network.transport")
+		require.NotContains(t, attrs, "network.protocol.name")
+		require.NotContains(t, attrs, "network.protocol.version")
 		require.NotEmpty(t, attrs["jsonrpc.request.id"])
 
 		// The legacy keys must be gone under this convention.

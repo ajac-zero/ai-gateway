@@ -235,6 +235,7 @@ func (m *mcpRequestContext) handleServerDiscover(ctx context.Context, w http.Res
 				slog.String("error", err.Error()))
 			backendMetrics.RecordMethodErrorCount(ctx, req.Method, nil, metrics.MCPStatusError)
 			backendMetrics.RecordRequestErrorDuration(ctx, backendStartAt, errorType(err), nil)
+			m.recordClientOperation(ctx, backend.Name, backendStartAt, req.Method, nil, err)
 			continue
 		}
 		if span != nil {
@@ -242,6 +243,7 @@ func (m *mcpRequestContext) handleServerDiscover(ctx context.Context, w http.Res
 		}
 		backendMetrics.RecordMethodCount(ctx, req.Method, nil)
 		backendMetrics.RecordRequestDuration(ctx, backendStartAt, nil)
+		m.recordClientOperation(ctx, backend.Name, backendStartAt, req.Method, nil, nil)
 		results = append(results, result)
 	}
 	if len(results) == 0 {
@@ -473,6 +475,7 @@ func sendToAllModernBackendsAndAggregateResponses[T any](ctx context.Context, m 
 				slog.String("error", err.Error()))
 			backendMetrics.RecordMethodErrorCount(ctx, req.Method, nil, metrics.MCPStatusError)
 			backendMetrics.RecordRequestErrorDuration(ctx, backendStartAt, errorType(err), nil)
+			m.recordClientOperation(ctx, backendName, backendStartAt, req.Method, nil, err)
 			continue
 		}
 		var result T
@@ -482,7 +485,9 @@ func sendToAllModernBackendsAndAggregateResponses[T any](ctx context.Context, m 
 				slog.String("backend", backendName),
 				slog.String("error", err.Error()))
 			backendMetrics.RecordMethodErrorCount(ctx, req.Method, nil, metrics.MCPStatusError)
+			unmarshalErr := fmt.Errorf("failed to unmarshal %s response: %w", req.Method, err)
 			backendMetrics.RecordRequestErrorDuration(ctx, backendStartAt, metrics.MCPErrorInternal, nil)
+			m.recordClientOperation(ctx, backendName, backendStartAt, req.Method, nil, unmarshalErr)
 			continue
 		}
 		if span != nil {
@@ -490,6 +495,7 @@ func sendToAllModernBackendsAndAggregateResponses[T any](ctx context.Context, m 
 		}
 		backendMetrics.RecordMethodCount(ctx, req.Method, nil)
 		backendMetrics.RecordRequestDuration(ctx, backendStartAt, nil)
+		m.recordClientOperation(ctx, backendName, backendStartAt, req.Method, nil, nil)
 		responses = append(responses, broadCastResponse[T]{backendName: backendName, res: result})
 	}
 	if len(responses) == 0 {

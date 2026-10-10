@@ -294,6 +294,12 @@ func TestImageGenerationEndpointSpec_GetTranslator(t *testing.T) {
 	_, err := spec.GetTranslator(filterapi.VersionedAPISchema{Name: filterapi.APISchemaOpenAI}, "override")
 	require.NoError(t, err)
 
+	_, err = spec.GetTranslator(filterapi.VersionedAPISchema{Name: filterapi.APISchemaGCPVertexAI}, "override")
+	require.NoError(t, err)
+
+	_, err = spec.GetTranslator(filterapi.VersionedAPISchema{Name: filterapi.APISchemaGoogleAIStudio, Version: "v1beta"}, "override")
+	require.NoError(t, err)
+
 	_, err = spec.GetTranslator(filterapi.VersionedAPISchema{Name: filterapi.APISchemaAzureOpenAI}, "override")
 	require.ErrorContains(t, err, "unsupported API schema")
 }
@@ -331,6 +337,7 @@ func TestMessagesEndpointSpec_GetTranslator(t *testing.T) {
 	spec := MessagesEndpointSpec{}
 	for _, schema := range []filterapi.VersionedAPISchema{
 		{Name: filterapi.APISchemaGCPAnthropic},
+		{Name: filterapi.APISchemaGCPVertexAI},
 		{Name: filterapi.APISchemaAWSAnthropic},
 		{Name: filterapi.APISchemaAnthropic},
 		{Name: filterapi.APISchemaOpenAI},     // This is for OpenAI-schema backends like vLLM that support the /v1/messages endpoint
@@ -501,6 +508,17 @@ func TestResponsesEndpointSpec_GetTranslator(t *testing.T) {
 	_, body, err = awsTranslator.RequestBody(original, &openai.ResponseRequest{Model: "us.openai.gpt-5.6-luna"}, false)
 	require.NoError(t, err)
 	require.Equal(t, original, body)
+
+	gcpTranslator, err := spec.GetTranslator(filterapi.VersionedAPISchema{Name: filterapi.APISchemaGCPVertexAI}, "gemini-2.5-flash")
+	require.NoError(t, err)
+	headers, body, err = gcpTranslator.RequestBody(
+		[]byte(`{"model":"gemini","input":"hello"}`),
+		&openai.ResponseRequest{Model: "gemini", Input: openai.ResponseNewParamsInputUnion{OfString: ptr.To("hello")}},
+		false,
+	)
+	require.NoError(t, err)
+	require.Equal(t, internalapi.Header{":path", "publishers/google/models/gemini-2.5-flash:generateContent"}, headers[0])
+	require.JSONEq(t, `{"contents":[{"role":"user","parts":[{"text":"hello"}]}],"tools":null,"generationConfig":{}}`, string(body))
 
 	anthropicTranslator, err := spec.GetTranslator(filterapi.VersionedAPISchema{Name: filterapi.APISchemaAnthropic, Prefix: "custom"}, "claude-opus-4-7")
 	require.NoError(t, err)

@@ -185,6 +185,11 @@ const (
 	APISchemaAWSOpenAI APISchemaName = "AWSOpenAI"
 	// APISchemaTypeSafe represents the native TypeSafe AI System One API schema (Jev).
 	APISchemaTypeSafe APISchemaName = "TypeSafe"
+	// APISchemaGoogleAIStudio represents the Google AI Studio (Gemini Developer API) schema hosted at
+	// generativelanguage.googleapis.com. Used with Google AI Studio API key auth (x-goog-api-key), e.g.
+	// for Gemini image generation. Distinct from APISchemaGCPVertexAI, which uses Vertex AI service
+	// account credentials.
+	APISchemaGoogleAIStudio APISchemaName = "GoogleAIStudio"
 )
 
 // RouteRuleName is the name of the route rule.
@@ -219,6 +224,8 @@ type BackendAuth struct {
 	AzureAPIKey *AzureAPIKeyAuth `json:"azureAPIKey,omitempty"`
 	// AnthropicAPIKey is the Anthropic API key.
 	AnthropicAPIKey *AnthropicAPIKeyAuth `json:"anthropicAPIKey,omitempty"`
+	// GoogleAIKey is the Google AI Studio API key.
+	GoogleAIKey *GoogleAIKeyAuth `json:"googleAIKey,omitempty"`
 	// AzureAuth specifies the location of Azure access token file.
 	AzureAuth *AzureAuth `json:"azure,omitempty"`
 	// GCPAuth specifies the location of GCP credential file.
@@ -298,6 +305,17 @@ type AnthropicAPIKeyAuth struct {
 
 // LogValue implements slog.LogValuer for AnthropicAPIKeyAuth to redact sensitive information.
 func (a AnthropicAPIKeyAuth) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("key", "[REDACTED]"))
+}
+
+// GoogleAIKeyAuth defines the Google AI Studio API key.
+type GoogleAIKeyAuth struct {
+	// Key is the Google AI Studio API key as a literal string.
+	Key string `json:"key"`
+}
+
+// LogValue implements slog.LogValuer for GoogleAIKeyAuth to redact sensitive information.
+func (a GoogleAIKeyAuth) LogValue() slog.Value {
 	return slog.GroupValue(slog.String("key", "[REDACTED]"))
 }
 

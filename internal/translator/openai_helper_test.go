@@ -779,6 +779,24 @@ func TestOpenAIStreamToAnthropicState_ProcessBuffer_EmptyInput(t *testing.T) {
 	assert.Empty(t, out)
 }
 
+func TestOpenAIStreamToAnthropicState_ProcessBuffer_UsageOnly(t *testing.T) {
+	state := &openAIStreamToAnthropicState{
+		activeTools:  make(map[int64]*streamToolCall),
+		requestModel: "test-model",
+	}
+	state.buffer.WriteString("data: {\"id\":\"chatcmpl-empty\",\"model\":\"test-model\",\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":0}}\n\n")
+
+	var out []byte
+	err := state.processBuffer(&out, true)
+	require.NoError(t, err)
+
+	events := parseSSEEventsFromBytes(out)
+	require.Len(t, events, 3)
+	assert.Equal(t, "message_start", events[0].eventType)
+	assert.Equal(t, "message_delta", events[1].eventType)
+	assert.Equal(t, "message_stop", events[2].eventType)
+}
+
 func TestOpenAIStreamToAnthropicState_ProcessBuffer_SkipsDoneMarker(t *testing.T) {
 	// Ensure [DONE] marker does not cause errors or spurious events.
 	state := &openAIStreamToAnthropicState{
@@ -1112,6 +1130,24 @@ func TestAppendAnthropicUserMessage_URLImage(t *testing.T) {
 	require.Len(t, parts, 2)
 	require.NotNil(t, parts[1].OfImageURL)
 	assert.Equal(t, "https://example.com/cat.png", parts[1].OfImageURL.ImageURL.URL)
+}
+
+func TestAppendAnthropicUserMessage_UnknownImageSource(t *testing.T) {
+	msg := anthropic.MessageParam{
+		Role: anthropic.MessageRoleUser,
+		Content: anthropic.MessageContent{Array: []anthropic.ContentBlockParam{
+			{Text: &anthropic.TextBlockParam{Type: "text", Text: "Describe this image"}},
+			{Image: &anthropic.ImageBlockParam{Type: "image", Source: anthropic.ImageSource{}}},
+		}},
+	}
+
+	msgs := appendAnthropicUserMessage(nil, msg)
+	require.Len(t, msgs, 1)
+	parts, ok := msgs[0].OfUser.Content.Value.([]openai.ChatCompletionContentPartUserUnionParam)
+	require.True(t, ok)
+	require.Len(t, parts, 2)
+	require.NotNil(t, parts[1].OfImageURL)
+	assert.Empty(t, parts[1].OfImageURL.ImageURL.URL)
 }
 
 func TestAppendAnthropicUserMessage_TextOnly(t *testing.T) {

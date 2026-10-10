@@ -424,6 +424,25 @@ func TestBuildRequestAttributes(t *testing.T) {
 			},
 		},
 		{
+			// HideTools omits llm.tools.* entirely. Other attributes such as
+			// input messages and invocation parameters are still emitted.
+			name:    "request with tools and HideTools",
+			req:     toolsReq,
+			reqBody: string(toolsReqBody),
+			config:  &openinference.TraceConfig{HideTools: true},
+			expectedAttrs: []attribute.KeyValue{
+				attribute.String(openinference.SpanKind, openinference.SpanKindLLM),
+				attribute.String(openinference.LLMSystem, openinference.LLMSystemOpenAI),
+				attribute.String(openinference.LLMModelName, openai.ModelGPT5Nano),
+				attribute.String(openinference.InputValue, string(toolsReqBody)),
+				attribute.String(openinference.InputMimeType, openinference.MimeTypeJSON),
+				attribute.String(openinference.LLMInvocationParameters, `{"model":"gpt-5-nano","tool_choice":"auto"}`),
+				attribute.String(openinference.InputMessageAttribute(0, openinference.MessageRole), openai.ChatMessageRoleUser),
+				attribute.String(openinference.InputMessageAttribute(0, openinference.MessageContent), "What is the weather like in Boston today?"),
+				// No llm.tools.* attributes when HideTools is true.
+			},
+		},
+		{
 			name:    "request with audio content",
 			req:     audioReq,
 			reqBody: string(audioReqBody),

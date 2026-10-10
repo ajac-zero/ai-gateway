@@ -483,7 +483,7 @@ type initializeResult struct {
 	result    *mcp.InitializeResult
 }
 
-func (m *mcpRequestContext) initializeSession(ctx context.Context, routeName filterapi.MCPRouteName, backend filterapi.MCPBackend, p *mcp.InitializeParams, startAt time.Time) (*initializeResult, error) {
+func (m *mcpRequestContext) initializeSession(ctx context.Context, routeName filterapi.MCPRouteName, backend filterapi.MCPBackend, p *mcp.InitializeParams, startAt time.Time) (_ *initializeResult, retErr error) {
 	// Send the initialize request to the MCP backend listener.
 	reqID := mustJSONRPCRequestID()
 	var (
@@ -497,6 +497,15 @@ func (m *mcpRequestContext) initializeSession(ctx context.Context, routeName fil
 			return nil, fmt.Errorf("failed to marshal MCP initialize params: %w", err)
 		}
 		mcpReq := &jsonrpc.Request{Method: "initialize", Params: initializeReq, ID: reqID}
+		opStartAt := time.Now()
+		// Record the failure of any early return below; success is recorded once the
+		// initialize result has been decoded.
+		initRecorded := false
+		defer func() {
+			if !initRecorded && retErr != nil {
+				m.recordClientOperation(ctx, backend.Name, opStartAt, mcpReq.Method, p, retErr)
+			}
+		}()
 		resp, err := m.invokeJSONRPCRequest(ctx, routeName, backend, nil, mcpReq, p)
 		if err != nil {
 			return nil, fmt.Errorf("failed to send MCP initialize request: %w", err)
@@ -592,25 +601,33 @@ func (m *mcpRequestContext) initializeSession(ctx context.Context, routeName fil
 		backendMetrics.RecordServerCapabilities(ctx, initResult.Capabilities, p)
 		backendMetrics.RecordMethodCount(ctx, "initialize", p)
 		backendMetrics.RecordRequestDuration(ctx, startAt, p)
+		initRecorded = true
+		m.recordClientOperation(ctx, backend.Name, opStartAt, mcpReq.Method, p, nil)
 	}
 
 	// Need to invoke "notifications/initialized" to complete the initialization.
 	{
 		// Send the notifications/initialized request to the MCP backend listener.
 		mcpReq := &jsonrpc.Request{Method: "notifications/initialized", Params: emptyJSONRPCMessage}
+		opStartAt := time.Now()
 		resp, err := m.invokeJSONRPCRequest(ctx, routeName, backend, &compositeSessionEntry{
 			sessionID: gatewayToMCPServerSessionID(sessionID),
 		}, mcpReq, p)
 		if err != nil {
-			return nil, fmt.Errorf("failed to send MCP notifications/initialized request: %w", err)
+			err = fmt.Errorf("failed to send MCP notifications/initialized request: %w", err)
+			m.recordClientOperation(ctx, backend.Name, opStartAt, mcpReq.Method, nil, err)
+			return nil, err
 		}
 		defer func() {
 			ensureHTTPConnectionReused(resp)
 		}()
 		if resp.StatusCode != http.StatusAccepted {
 			body, _ := io.ReadAll(resp.Body)
-			return nil, fmt.Errorf("MCP notifications/initialized request failed with status code %d, body=%s", resp.StatusCode, string(body))
+			err = fmt.Errorf("MCP notifications/initialized request failed with status code %d, body=%s", resp.StatusCode, string(body))
+			m.recordClientOperation(ctx, backend.Name, opStartAt, mcpReq.Method, nil, err)
+			return nil, err
 		}
+		m.recordClientOperation(ctx, backend.Name, opStartAt, mcpReq.Method, nil, nil)
 		m.metrics.WithBackend(backend.Name).RecordMethodCount(ctx, "notifications/initialized", p)
 	}
 	if m.l.Enabled(ctx, slog.LevelDebug) {
@@ -699,4 +716,13 @@ func mustJSONRPCRequestID() jsonrpc.ID {
 func ensureHTTPConnectionReused(resp *http.Response) {
 	_, _ = io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()
+}
+
+// recordClientOperation records mcp.client.operation.duration for a request the
+// gateway sent to the given backend, when the configured metrics implement
+// metrics.MCPOperationMetrics. Other implementations are left untouched.
+func (m *mcpRequestContext) recordClientOperation(ctx context.Context, backend string, startAt time.Time, method string, params mcp.Params, opErr error) {
+	if om, ok := m.metrics.WithBackend(backend).(metrics.MCPOperationMetrics); ok {
+		om.RecordClientOperationDuration(ctx, startAt, method, params, opErr)
+	}
 }

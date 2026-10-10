@@ -183,6 +183,84 @@ func TestWithTestUpstream(t *testing.T) {
 			expResponseBody: `{"error":{"type":"OpenAIBackendError","message":"backend timeout","code":"503"},"type":"error"}`,
 		},
 		{
+			name:              "gcp-vertexai - /v1/images/generations",
+			backend:           "gcp-vertexai",
+			path:              "/v1/images/generations",
+			method:            http.MethodPost,
+			requestBody:       `{"model":"gemini-2.5-flash-image","prompt":"a cat wearing sunglasses","size":"1536x1024"}`,
+			expRequestBody:    `{"contents":[{"parts":[{"text":"a cat wearing sunglasses"}],"role":"user"}],"tools":null,"generationConfig":{"responseModalities":["TEXT","IMAGE"],"imageConfig":{"aspectRatio":"3:2"}}}`,
+			expPath:           "/v1/projects/gcp-project-name/locations/gcp-region/publishers/google/models/gemini-2.5-flash-image:generateContent",
+			expRequestHeaders: map[string]string{"Authorization": "Bearer " + fakeGCPAuthToken},
+			responseStatus:    strconv.Itoa(http.StatusOK),
+			responseBody:      `{"candidates":[{"content":{"role":"model","parts":[{"text":"Here you go."},{"inlineData":{"mimeType":"image/png","data":"aW1hZ2Ux"}}]},"finishReason":"STOP"}],"createTime":"2026-10-02T12:00:00Z","usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":1290,"totalTokenCount":1297}}`,
+			expStatus:         http.StatusOK,
+			expResponseBody:   `{"created":1790942400,"data":[{"b64_json":"aW1hZ2Ux"}],"usage":{"total_tokens":1297,"input_tokens":7,"output_tokens":1290},"output_format":"png"}`,
+		},
+		{
+			name:              "gcp-vertexai - /v1/images/generations - upstream error mapped to OpenAI",
+			backend:           "gcp-vertexai",
+			path:              "/v1/images/generations",
+			method:            http.MethodPost,
+			requestBody:       `{"model":"gemini-2.5-flash-image","prompt":"a cat"}`,
+			expPath:           "/v1/projects/gcp-project-name/locations/gcp-region/publishers/google/models/gemini-2.5-flash-image:generateContent",
+			responseHeaders:   "content-type:application/json",
+			responseStatus:    strconv.Itoa(http.StatusBadRequest),
+			responseBody:      `{"error":{"code":400,"message":"Request contains an invalid argument.","status":"INVALID_ARGUMENT"}}`,
+			expStatus:         http.StatusBadRequest,
+			expResponseBody:   `{"type":"error","error":{"type":"INVALID_ARGUMENT","message":"Request contains an invalid argument.","code":"400"}}`,
+			expRequestHeaders: map[string]string{"Authorization": "Bearer " + fakeGCPAuthToken},
+		},
+		{
+			name:        "gcp-vertexai - /v1/images/generations - n greater than 1 rejected",
+			backend:     "gcp-vertexai",
+			path:        "/v1/images/generations",
+			method:      http.MethodPost,
+			requestBody: `{"model":"gemini-2.5-flash-image","prompt":"a cat","n":2}`,
+			expStatus:   http.StatusUnprocessableEntity,
+			expResponseBodyFunc: func(t require.TestingT, body []byte) {
+				require.Contains(t, string(body), "n=2 is not supported by GCP Vertex AI Gemini image models")
+			},
+		},
+		{
+			name:        "gcp-vertexai - /v1/images/generations - unsupported aspect ratio rejected",
+			backend:     "gcp-vertexai",
+			path:        "/v1/images/generations",
+			method:      http.MethodPost,
+			requestBody: `{"model":"gemini-2.5-flash-image","prompt":"a cat","size":"4000x1000"}`,
+			expStatus:   http.StatusUnprocessableEntity,
+			expResponseBodyFunc: func(t require.TestingT, body []byte) {
+				// The body must be valid JSON, so the message must not contain unescaped quotes.
+				var errResp openai.Error
+				require.NoError(t, json.Unmarshal(body, &errResp))
+				require.Contains(t, errResp.Error.Message, "size 4000x1000 does not match an aspect ratio supported by GCP Vertex AI Gemini image models")
+			},
+		},
+		{
+			name:               "gcp-vertexai - /v1/images/generations - safety block becomes 400",
+			backend:            "gcp-vertexai",
+			path:               "/v1/images/generations",
+			method:             http.MethodPost,
+			requestBody:        `{"model":"gemini-2.5-flash-image","prompt":"something disallowed"}`,
+			expPath:            "/v1/projects/gcp-project-name/locations/gcp-region/publishers/google/models/gemini-2.5-flash-image:generateContent",
+			responseStatus:     strconv.Itoa(http.StatusOK),
+			responseBody:       `{"candidates":[{"content":{"role":"model","parts":[{"text":"I can't help with that."}]},"finishReason":"IMAGE_SAFETY"}],"usageMetadata":{"promptTokenCount":5,"totalTokenCount":5}}`,
+			expStatus:          http.StatusBadRequest,
+			expResponseBody:    `{"type":"error","error":{"type":"content_policy_violation","code":"400","message":"GCP Vertex AI returned no image: finish reason IMAGE_SAFETY. Model text: I can't help with that."}}`,
+			expResponseHeaders: map[string]string{"Content-Type": "application/json"},
+		},
+		{
+			name:            "gcp-vertexai - /v1/images/generations - text-only answer becomes 502",
+			backend:         "gcp-vertexai",
+			path:            "/v1/images/generations",
+			method:          http.MethodPost,
+			requestBody:     `{"model":"gemini-2.5-flash-image","prompt":"a cat"}`,
+			expPath:         "/v1/projects/gcp-project-name/locations/gcp-region/publishers/google/models/gemini-2.5-flash-image:generateContent",
+			responseStatus:  strconv.Itoa(http.StatusOK),
+			responseBody:    `{"candidates":[{"content":{"role":"model","parts":[{"text":"Which cat?"}]},"finishReason":"STOP"}]}`,
+			expStatus:       http.StatusBadGateway,
+			expResponseBody: `{"type":"error","error":{"type":"GCPVertexAIBackendError","code":"502","message":"GCP Vertex AI returned no image: finish reason STOP. Model text: Which cat?"}}`,
+		},
+		{
 			name:            "unknown path",
 			path:            "/unknown",
 			requestBody:     `{"prompt": "hello"}`,
@@ -1458,6 +1536,103 @@ data: {"type":"response.output_item.done","sequence_number":9,"output_index":0,"
 event: response.completed
 data: {"type":"response.completed","sequence_number":10,"response":{"id":"resp_67c","object":"response","created_at":1741290958,"status":"completed","error":null,"incomplete_details":null,"instructions":"You are a helpful assistant.","max_output_tokens":null,"model":"gpt-4.1-2025-04-14","output":[{"id":"msg_67c","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"This is a test.","annotations":[]}]}],"parallel_tool_calls":true,"previous_response_id":null,"reasoning":{"effort":null,"summary":null},"store":true,"temperature":1.0,"text":{"format":{"type":"text"}},"tool_choice":"auto","tools":[],"top_p":1.0,"truncation":"disabled","usage":{"input_tokens":37,"output_tokens":11,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":48},"user":null,"metadata":{}}}
 `,
+		},
+		{
+			name:              "gcp-vertexai - /v1/responses",
+			backend:           "gcp-vertexai",
+			path:              "/v1/responses",
+			method:            http.MethodPost,
+			requestBody:       `{"model":"gemini-1.5-pro","instructions":"You are a helpful assistant.","input":"Say this is a test.","max_output_tokens":64}`,
+			expRequestBody:    `{"contents":[{"parts":[{"text":"Say this is a test."}],"role":"user"}],"tools":null,"generationConfig":{"maxOutputTokens":64},"systemInstruction":{"parts":[{"text":"You are a helpful assistant."}]}}`,
+			expPath:           "/v1/projects/gcp-project-name/locations/gcp-region/publishers/google/models/gemini-1.5-pro:generateContent",
+			expRequestHeaders: map[string]string{"Authorization": "Bearer " + fakeGCPAuthToken},
+			responseStatus:    strconv.Itoa(http.StatusOK),
+			responseBody:      `{"candidates":[{"content":{"parts":[{"text":"This is a test."}],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":15,"candidatesTokenCount":10,"totalTokenCount":35,"cachedContentTokenCount":10,"thoughtsTokenCount":10},"modelVersion":"gemini-1.5-pro-002","createTime":"2025-07-11T22:15:44.956335Z","responseId":"EI5xaK-vOtqJm22IPmuCR14AI"}`,
+			expStatus:         http.StatusOK,
+			expResponseBody:   `{"id":"resp_EI5xaK-vOtqJm22IPmuCR14AI","object":"response","created_at":1752272144,"status":"completed","model":"gemini-1.5-pro-002","instructions":"You are a helpful assistant.","max_output_tokens":64,"output":[{"id":"msg_703482f8-2e5b-4dcc-a872-d74bd66c3866","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"This is a test.","annotations":[]}]}],"parallel_tool_calls":true,"store":false,"temperature":1,"text":{"format":{"type":"text"}},"tool_choice":"auto","top_p":1,"truncation":"disabled","usage":{"input_tokens":15,"input_tokens_details":{"cached_tokens":10,"cache_write_tokens":0,"cache_creation_input_tokens":0},"output_tokens":20,"output_tokens_details":{"reasoning_tokens":10},"total_tokens":35}}`,
+		},
+		{
+			name:              "gcp-vertexai - /v1/responses - tool use",
+			backend:           "gcp-vertexai",
+			path:              "/v1/responses",
+			method:            http.MethodPost,
+			requestBody:       `{"model":"gemini-1.5-pro","input":[{"role":"user","content":"Weather in Paris?"},{"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"c2lnLTE="},{"type":"function_call","call_id":"call_1","name":"get_weather","arguments":"{\"city\":\"Paris\"}"},{"type":"function_call_output","call_id":"call_1","output":"18C"},{"role":"user","content":"And Rome?"}],"tools":[{"type":"function","name":"get_weather","description":"Get the weather","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}],"tool_choice":"required"}`,
+			expRequestBody:    `{"contents":[{"parts":[{"text":"Weather in Paris?"}],"role":"user"},{"parts":[{"functionCall":{"args":{"city":"Paris"},"name":"get_weather"},"thoughtSignature":"c2lnLTE="}],"role":"model"},{"parts":[{"functionResponse":{"name":"get_weather","response":{"output":"18C"}}}],"role":"user"},{"parts":[{"text":"And Rome?"}],"role":"user"}],"tools":[{"functionDeclarations":[{"description":"Get the weather","name":"get_weather","parameters":{"properties":{"city":{"type":"string"}},"required":["city"],"type":"object"}}]}],"toolConfig":{"functionCallingConfig":{"mode":"ANY"}},"generationConfig":{}}`,
+			expPath:           "/v1/projects/gcp-project-name/locations/gcp-region/publishers/google/models/gemini-1.5-pro:generateContent",
+			expRequestHeaders: map[string]string{"Authorization": "Bearer " + fakeGCPAuthToken},
+			responseStatus:    strconv.Itoa(http.StatusOK),
+			responseBody:      `{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"get_weather","args":{"city":"Rome"}},"thoughtSignature":"c2lnLTI="}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":50,"candidatesTokenCount":11,"totalTokenCount":61},"createTime":"2025-07-11T22:15:44Z","responseId":"resp-tool"}`,
+			expStatus:         http.StatusOK,
+			expResponseBody:   `{"id":"resp_resp-tool","object":"response","created_at":1752272144,"status":"completed","model":"gemini-1.5-pro","output":[{"id":"rs_703482f8-2e5b-4dcc-a872-d74bd66c3866","type":"reasoning","summary":[],"encrypted_content":"c2lnLTI="},{"id":"fc_703482f8-2e5b-4dcc-a872-d74bd66c3866","type":"function_call","call_id":"call_703482f8-2e5b-4dcc-a872-d74bd66c3866","name":"get_weather","arguments":"{\"city\":\"Rome\"}","status":"completed"}],"parallel_tool_calls":true,"store":false,"temperature":1,"text":{"format":{"type":"text"}},"tool_choice":"required","tools":[{"type":"function","name":"get_weather","description":"Get the weather","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}],"top_p":1,"truncation":"disabled","usage":{"input_tokens":50,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0,"cache_creation_input_tokens":0},"output_tokens":11,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":61}}`,
+		},
+		{
+			name:              "gcp-vertexai - /v1/responses - stream",
+			backend:           "gcp-vertexai",
+			path:              "/v1/responses",
+			method:            http.MethodPost,
+			responseType:      "sse",
+			requestBody:       `{"model":"gemini-1.5-pro","input":"Say this is a test.","stream":true}`,
+			expRequestBody:    `{"contents":[{"parts":[{"text":"Say this is a test."}],"role":"user"}],"tools":null,"generationConfig":{}}`,
+			expPath:           "/v1/projects/gcp-project-name/locations/gcp-region/publishers/google/models/gemini-1.5-pro:streamGenerateContent",
+			expRawQuery:       "alt=sse",
+			expRequestHeaders: map[string]string{"Authorization": "Bearer " + fakeGCPAuthToken},
+			responseStatus:    strconv.Itoa(http.StatusOK),
+			responseBody: `{"responseId":"msg_123","createTime":"2024-11-15T09:00:00Z","candidates":[{"content":{"parts":[{"text":"This"}],"role":"model"}}]}
+{"responseId":"msg_123","createTime":"2024-11-15T09:00:00Z","candidates":[{"content":{"parts":[{"text":" is"}],"role":"model"}}]}
+{"responseId":"msg_123","createTime":"2024-11-15T09:00:00Z","candidates":[{"content":{"parts":[{"text":" a test."}],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":7,"totalTokenCount":17}}`,
+			expStatus:          http.StatusOK,
+			expResponseHeaders: map[string]string{"Content-Type": "text/event-stream"},
+			expResponseBodyFunc: func(t require.TestingT, body []byte) {
+				var names, deltas []string
+				var completed string
+				for _, block := range strings.Split(strings.TrimSpace(string(body)), "\n\n") {
+					eventLine, dataLine, ok := strings.Cut(block, "\n")
+					require.True(t, ok, block)
+					name := strings.TrimPrefix(eventLine, "event: ")
+					data := strings.TrimPrefix(dataLine, "data: ")
+					var event struct {
+						Type           string          `json:"type"`
+						SequenceNumber int             `json:"sequence_number"`
+						Delta          string          `json:"delta"`
+						Response       json.RawMessage `json:"response"`
+					}
+					require.NoError(t, json.Unmarshal([]byte(data), &event))
+					require.Equal(t, name, event.Type)
+					require.Equal(t, len(names), event.SequenceNumber)
+					names = append(names, name)
+					switch name {
+					case "response.output_text.delta":
+						deltas = append(deltas, event.Delta)
+					case "response.completed":
+						completed = string(event.Response)
+					}
+				}
+				require.Equal(t, []string{
+					"response.created", "response.in_progress", "response.output_item.added", "response.content_part.added",
+					"response.output_text.delta", "response.output_text.delta", "response.output_text.delta",
+					"response.output_text.done", "response.content_part.done", "response.output_item.done", "response.completed",
+				}, names)
+				require.Equal(t, []string{"This", " is", " a test."}, deltas)
+				var resp openai.Response
+				require.NoError(t, json.Unmarshal([]byte(completed), &resp))
+				require.Equal(t, "resp_msg_123", resp.ID)
+				require.Equal(t, "completed", resp.Status)
+				require.Len(t, resp.Output, 1)
+				require.Equal(t, "This is a test.", resp.Output[0].OfOutputMessage.Content.OfContentArray[0].OfOutputText.Text)
+				require.Equal(t, &openai.ResponseUsage{InputTokens: 10, OutputTokens: 7, TotalTokens: 17}, resp.Usage)
+			},
+		},
+		{
+			name:        "gcp-vertexai - /v1/responses - previous_response_id is rejected",
+			backend:     "gcp-vertexai",
+			path:        "/v1/responses",
+			method:      http.MethodPost,
+			requestBody: `{"model":"gemini-1.5-pro","input":"Hi","previous_response_id":"resp_123"}`,
+			expStatus:   http.StatusUnprocessableEntity,
+			expResponseBodyFunc: func(t require.TestingT, body []byte) {
+				require.Contains(t, string(body), "previous_response_id")
+				require.Contains(t, string(body), "not supported for GCP Vertex AI backends")
+			},
 		},
 		{
 			name:              "anthropic - /v1/responses",
