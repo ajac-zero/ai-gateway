@@ -8,6 +8,9 @@ package tracing
 import (
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
+	"strconv"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -64,12 +67,23 @@ func mcpVocabularyOTel(captureContent bool) *mcpVocabulary {
 			span.SetAttributes(attribute.String("gen_ai.tool.call.result", string(resultJSON)))
 		},
 		requestError: func(span trace.Span, errType string, err error) {
-			// error.type is the OTel span attribute for the failure class; the
-			// JSON-RPC numeric code, when present, is rpc.response.status_code.
-			span.SetAttributes(attribute.String("error.type", errType))
+			// For a JSON-RPC error, error.type and rpc.response.status_code are both
+			// the string form of the code; otherwise error.type is the gateway's
+			// low-cardinality failure class.
+			var toolErr interface{ IsMCPToolError() bool }
 			var jsonrpcErr *jsonrpc.Error
-			if errors.As(err, &jsonrpcErr) {
-				span.SetAttributes(attribute.Int64("rpc.response.status_code", jsonrpcErr.Code))
+			switch {
+			case errors.As(err, &toolErr) && toolErr.IsMCPToolError():
+				span.SetAttributes(attribute.String("error.type", "tool_error"))
+			case errors.As(err, &jsonrpcErr):
+				code := strconv.FormatInt(jsonrpcErr.Code, 10)
+				span.SetAttributes(
+					attribute.String("error.type", code),
+					attribute.String("rpc.response.status_code", code),
+				)
+				return
+			default:
+				span.SetAttributes(attribute.String("error.type", errType))
 			}
 		},
 	}
@@ -93,17 +107,18 @@ func otelMCPListResult(span trace.Span, result any) {
 	}
 }
 
+// otelMCPRequestAttributes returns the attributes known when the span starts.
+//
+// Only values the gateway actually observes are reported. The negotiated
+// protocol version and the transport/network details of the gateway-to-backend
+// hop are not available at this point, so mcp.protocol.version is taken only
+// from the version the client declares in initialize, and network.* and
+// server.* are not set rather than guessed.
 func otelMCPRequestAttributes(req *jsonrpc.Request, p mcp.Params, captureContent bool) []attribute.KeyValue {
-	attrs := []attribute.KeyValue{
-		attribute.String("mcp.protocol.version", "2025-06-18"),
-		// network.transport is the OSI transport ("tcp"); network.protocol.* the
-		// application protocol. The gateway forwards to a local plain-HTTP/1.1
-		// listener, so the version is fixed.
-		attribute.String("network.transport", "tcp"),
-		attribute.String("network.protocol.name", "http"),
-		attribute.String("network.protocol.version", "1.1"),
-		attribute.String("jsonrpc.request.id", fmt.Sprintf("%v", req.ID)),
-		attribute.String("mcp.method.name", req.Method),
+	attrs := []attribute.KeyValue{attribute.String("mcp.method.name", req.Method)}
+	// jsonrpc.request.id SHOULD NOT be captured for notifications (no id).
+	if req.ID.IsValid() {
+		attrs = append(attrs, attribute.String("jsonrpc.request.id", fmt.Sprintf("%v", req.ID.Raw())))
 	}
 	return append(attrs, otelMCPParamsAttributes(p, captureContent)...)
 }
@@ -112,6 +127,9 @@ func otelMCPParamsAttributes(p mcp.Params, captureContent bool) []attribute.KeyV
 	var attrs []attribute.KeyValue
 	switch params := p.(type) {
 	case *mcp.InitializeParams:
+		if params.ProtocolVersion != "" {
+			attrs = append(attrs, attribute.String("mcp.protocol.version", params.ProtocolVersion))
+		}
 		if params.ClientInfo != nil {
 			attrs = append(attrs,
 				attribute.String("mcp.client.name", params.ClientInfo.Name),
@@ -133,6 +151,12 @@ func otelMCPParamsAttributes(p mcp.Params, captureContent bool) []attribute.KeyV
 		}
 	case *mcp.GetPromptParams:
 		attrs = append(attrs, attribute.String("gen_ai.prompt.name", params.Name))
+		// Prompt arguments are opt-in content: gen_ai.prompt.variable.<name>.
+		if captureContent {
+			for _, k := range slices.Sorted(maps.Keys(params.Arguments)) {
+				attrs = append(attrs, attribute.String("gen_ai.prompt.variable."+k, params.Arguments[k]))
+			}
+		}
 	case *mcp.SetLoggingLevelParams:
 		attrs = append(attrs, attribute.String("mcp.logging.level", string(params.Level)))
 	case *mcp.ListResourcesParams:

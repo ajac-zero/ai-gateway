@@ -775,3 +775,175 @@ func TestAIServiceBackendAttribute(t *testing.T) {
 		require.Equal(t, uint64(1), count)
 	}
 }
+
+func collectMetrics(t *testing.T, r metric.Reader) map[string]metricdata.Metrics {
+	var data metricdata.ResourceMetrics
+	require.NoError(t, r.Collect(t.Context(), &data))
+	out := map[string]metricdata.Metrics{}
+	for _, sm := range data.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			out[m.Name] = m
+		}
+	}
+	return out
+}
+
+func newClientTestMetrics(op GenAIOperation, schema filterapi.APISchemaName) (*metric.ManualReader, *metricsImpl) {
+	mr := metric.NewManualReader()
+	meter := metric.NewMeterProvider(metric.WithReader(mr)).Meter("test")
+	pm := NewMetricsFactory(meter, nil, op).NewMetrics().(*metricsImpl)
+	pm.SetBackend(&filterapi.Backend{Name: "b", Schema: filterapi.VersionedAPISchema{Name: schema}})
+	pm.SetOriginalModel("orig")
+	pm.SetRequestModel("req")
+	pm.SetResponseModel("resp")
+	return mr, pm
+}
+
+func TestClientOperationDuration(t *testing.T) {
+	for _, success := range []bool{true, false} {
+		mr, pm := newClientTestMetrics(GenAIOperationCompletion, filterapi.APISchemaAzureOpenAI)
+		pm.StartRequest(nil)
+		pm.RecordRequestCompletion(t.Context(), success, nil)
+
+		m, ok := collectMetrics(t, mr)[genaiMetricClientOperationDuration]
+		require.True(t, ok)
+		assert.Equal(t, "gen_ai.client.operation.duration", m.Name)
+		assert.Equal(t, "s", m.Unit)
+		dps := m.Data.(metricdata.Histogram[float64]).DataPoints
+		require.Len(t, dps, 1)
+		exp := []attribute.KeyValue{
+			attribute.String("gen_ai.operation.name", "text_completion"),
+			attribute.String("gen_ai.provider.name", "azure.ai.openai"),
+			attribute.String("gen_ai.request.model", "req"),
+			attribute.String("gen_ai.response.model", "resp"),
+		}
+		if !success {
+			exp = append(exp, attribute.String("error.type", "_OTHER"))
+		}
+		want := attribute.NewSet(exp...)
+		assert.True(t, dps[0].Attributes.Equals(&want), "got %v", dps[0].Attributes)
+		// Legacy series is unchanged.
+		_, ok = collectMetrics(t, mr)[genaiMetricServerRequestDuration]
+		assert.True(t, ok)
+	}
+}
+
+func TestClientStreamingChunkMetrics(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		mr, pm := newClientTestMetrics(GenAIOperationMessages, filterapi.APISchemaAWSAnthropic)
+		pm.StartRequest(nil)
+		time.Sleep(time.Second)
+		pm.RecordTokenLatency(t.Context(), 0, false, nil)
+		time.Sleep(2 * time.Second)
+		pm.RecordTokenLatency(t.Context(), 1, false, nil)
+		time.Sleep(3 * time.Second)
+		pm.RecordTokenLatency(t.Context(), 2, true, nil)
+
+		ms := collectMetrics(t, mr)
+		want := attribute.NewSet(
+			attribute.String("gen_ai.operation.name", "chat"),
+			attribute.String("gen_ai.provider.name", "aws.bedrock"),
+			attribute.String("gen_ai.request.model", "req"),
+			attribute.String("gen_ai.response.model", "resp"),
+		)
+		first := ms[genaiMetricClientTimeToFirstChunk]
+		assert.Equal(t, "gen_ai.client.operation.time_to_first_chunk", first.Name)
+		assert.Equal(t, "s", first.Unit)
+		dp := first.Data.(metricdata.Histogram[float64]).DataPoints
+		require.Len(t, dp, 1)
+		assert.True(t, dp[0].Attributes.Equals(&want))
+		assert.Equal(t, uint64(1), dp[0].Count)
+		assert.InDelta(t, 1.0, dp[0].Sum, 1e-9)
+
+		per := ms[genaiMetricClientTimePerOutputChunk]
+		assert.Equal(t, "gen_ai.client.operation.time_per_output_chunk", per.Name)
+		assert.Equal(t, "s", per.Unit)
+		dp = per.Data.(metricdata.Histogram[float64]).DataPoints
+		require.Len(t, dp, 1)
+		assert.True(t, dp[0].Attributes.Equals(&want))
+		assert.Equal(t, uint64(2), dp[0].Count)
+		assert.InDelta(t, 5.0, dp[0].Sum, 1e-9)
+	})
+}
+
+func TestClientNonStreamingHasNoChunkMetrics(t *testing.T) {
+	mr, pm := newClientTestMetrics(GenAIOperationChat, filterapi.APISchemaOpenAI)
+	pm.StartRequest(nil)
+	pm.RecordRequestCompletion(t.Context(), true, nil)
+	ms := collectMetrics(t, mr)
+	_, ok := ms[genaiMetricClientTimeToFirstChunk]
+	assert.False(t, ok)
+	_, ok = ms[genaiMetricClientTimePerOutputChunk]
+	assert.False(t, ok)
+}
+
+func TestClientTokenMetrics(t *testing.T) {
+	mr, pm := newClientTestMetrics(GenAIOperationChat, filterapi.APISchemaOpenAI)
+	var usage TokenUsage
+	usage.SetInputTokens(10)
+	usage.SetOutputTokens(20)
+	usage.SetCachedInputTokens(3)
+	usage.SetCacheCreationInputTokens(2)
+	usage.SetReasoningTokens(5)
+	pm.RecordTokenUsage(t.Context(), usage, nil)
+	ms := collectMetrics(t, mr)
+
+	base := []attribute.KeyValue{
+		attribute.String("gen_ai.operation.name", "chat"),
+		attribute.String("gen_ai.provider.name", "openai"),
+		attribute.String("gen_ai.request.model", "req"),
+		attribute.String("gen_ai.response.model", "resp"),
+	}
+	withModality := attribute.NewSet(append(append([]attribute.KeyValue{}, base...), attribute.String("gen_ai.token.modality", "unknown"))...)
+	noModality := attribute.NewSet(base...)
+
+	counters := map[string]int64{
+		"gen_ai.client.inference.usage.input_tokens":             10,
+		"gen_ai.client.inference.usage.output_tokens":            20,
+		"gen_ai.client.inference.usage.cache_read.input_tokens":  3,
+		"gen_ai.client.inference.usage.cache_write.input_tokens": 2,
+		"gen_ai.client.inference.usage.reasoning.output_tokens":  5,
+	}
+	for name, v := range counters {
+		m, ok := ms[name]
+		require.True(t, ok, name)
+		assert.Equal(t, "{token}", m.Unit, name)
+		sum := m.Data.(metricdata.Sum[int64])
+		assert.True(t, sum.IsMonotonic, name)
+		require.Len(t, sum.DataPoints, 1, name)
+		assert.Equal(t, v, sum.DataPoints[0].Value, name)
+		assert.True(t, sum.DataPoints[0].Attributes.Equals(&withModality), name)
+	}
+	for name, v := range map[string]float64{
+		"gen_ai.client.inference.operation.input_tokens":  10,
+		"gen_ai.client.inference.operation.output_tokens": 20,
+	} {
+		m, ok := ms[name]
+		require.True(t, ok, name)
+		assert.Equal(t, "{token}", m.Unit, name)
+		dps := m.Data.(metricdata.Histogram[float64]).DataPoints
+		require.Len(t, dps, 1, name)
+		assert.Equal(t, v, dps[0].Sum, name)
+		assert.True(t, dps[0].Attributes.Equals(&noModality), name)
+	}
+	// Legacy series preserved.
+	_, ok := ms[genaiMetricClientTokenUsage]
+	assert.True(t, ok)
+}
+
+func TestClientTokenMetricsSkippedForTokenCounting(t *testing.T) {
+	mr, pm := newClientTestMetrics(GenAIOperationCountTokens, filterapi.APISchemaAnthropic)
+	var usage TokenUsage
+	usage.SetInputTokens(10)
+	pm.RecordTokenUsage(t.Context(), usage, nil)
+	_, ok := collectMetrics(t, mr)["gen_ai.client.inference.usage.input_tokens"]
+	assert.False(t, ok)
+}
+
+func TestNormalizeClientValues(t *testing.T) {
+	assert.Equal(t, "chat", normalizeClientOperation("responses"))
+	assert.Equal(t, "embeddings", normalizeClientOperation("embeddings"))
+	assert.Equal(t, "rerank", normalizeClientOperation("rerank"))
+	assert.Equal(t, "anthropic", normalizeClientProvider("anthropic"))
+	assert.Equal(t, "gcp.vertex_ai", normalizeClientProvider("gcp.anthropic"))
+}

@@ -272,6 +272,9 @@ type EndpointPrefixes struct {
 	Anthropic string
 	// TypeSafe defaults to "/typesafe"
 	TypeSafe string
+	// Gemini defaults to "/v1beta". Gemini native paths take the form
+	// {Gemini}/models/{model}:(generateContent|streamGenerateContent).
+	Gemini string
 }
 
 // ParseEndpointPrefixes parses a comma-separated list of key:value pairs to populate EndpointPrefixes.
@@ -281,18 +284,21 @@ type EndpointPrefixes struct {
 //   - cohere
 //   - anthropic
 //   - typesafe
+//   - gemini
 //
 // Format example:
 //
-//	"openai:/,cohere:/cohere,anthropic:/anthropic,typesafe:/typesafe"
+//	"openai:/,cohere:/cohere,anthropic:/anthropic,typesafe:/typesafe,gemini:/v1beta"
 //
-// Unknown keys cause an error; values must be non-empty.
+// Unknown keys cause an error. An empty value removes that provider's extra
+// path prefix, such as openai: for OpenAI-compatible /v1 endpoints.
 func ParseEndpointPrefixes(s string) (EndpointPrefixes, error) {
 	out := EndpointPrefixes{
 		OpenAI:    "/",
 		Cohere:    "/cohere",
 		Anthropic: "/anthropic",
 		TypeSafe:  "/typesafe",
+		Gemini:    "/v1beta",
 	}
 	if s == "" {
 		return out, nil
@@ -312,7 +318,6 @@ func ParseEndpointPrefixes(s string) (EndpointPrefixes, error) {
 
 		key := strings.TrimSpace(parts[0])
 		value := strings.TrimSpace(parts[1])
-
 		switch key {
 		case "openai":
 			out.OpenAI = value
@@ -322,8 +327,10 @@ func ParseEndpointPrefixes(s string) (EndpointPrefixes, error) {
 			out.Anthropic = value
 		case "typesafe":
 			out.TypeSafe = value
+		case "gemini":
+			out.Gemini = value
 		default:
-			return EndpointPrefixes{}, fmt.Errorf("unknown endpointPrefixes key %q at position %d (allowed: openai, cohere, anthropic, typesafe)", key, i+1)
+			return EndpointPrefixes{}, fmt.Errorf("unknown endpointPrefixes key %q at position %d (allowed: openai, cohere, anthropic, typesafe, gemini)", key, i+1)
 		}
 	}
 	return out, nil
