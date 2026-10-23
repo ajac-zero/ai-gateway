@@ -120,6 +120,297 @@ func TestOpenAIMessagesToGeminiContents(t *testing.T) {
 				},
 			},
 		},
+		{
+			// Regression: when a tool result is immediately followed by a plain
+			// user text (client resumes the conversation right after a function
+			// call), the two must land on separate role="user" contents.
+			// Fusing them yields a single content with functionResponse+text,
+			// which Vertex Gemini rejects with "Requests ending with a model
+			// turn are not supported." (an obscure error, but reproduced
+			// against the live Vertex REST endpoint against gemini-3.6-flash
+			// during triage).
+			name: "tool result followed by user text emits two consecutive user contents",
+			messages: []openai.ChatCompletionMessageParamUnion{
+				{
+					OfUser: &openai.ChatCompletionUserMessageParam{
+						Role:    openai.ChatMessageRoleUser,
+						Content: openai.StringOrUserRoleContentUnion{Value: "list some go files"},
+					},
+				},
+				{
+					OfAssistant: &openai.ChatCompletionAssistantMessageParam{
+						Role: openai.ChatMessageRoleAssistant,
+						ToolCalls: []openai.ChatCompletionMessageToolCallParam{
+							{
+								ID: ptr.To("tool_call_1"),
+								Function: openai.ChatCompletionMessageToolCallFunctionParam{
+									Name:      "glob",
+									Arguments: "{\"pattern\":\"*.go\"}",
+								},
+								Type: openai.ChatCompletionMessageToolCallTypeFunction,
+							},
+						},
+					},
+				},
+				{
+					OfTool: &openai.ChatCompletionToolMessageParam{
+						ToolCallID: "tool_call_1",
+						Content:    openai.ContentUnion{Value: "main.go\nutil.go"},
+					},
+				},
+				{
+					OfUser: &openai.ChatCompletionUserMessageParam{
+						Role:    openai.ChatMessageRoleUser,
+						Content: openai.StringOrUserRoleContentUnion{Value: "Continue"},
+					},
+				},
+			},
+			expectedContents: []genai.Content{
+				{
+					Role:  genai.RoleUser,
+					Parts: []*genai.Part{{Text: "list some go files"}},
+				},
+				{
+					Role: genai.RoleModel,
+					Parts: []*genai.Part{
+						{
+							FunctionCall: &genai.FunctionCall{
+								Name: "glob",
+								Args: map[string]any{"pattern": "*.go"},
+							},
+							ThoughtSignature: dummyThoughtSignature,
+						},
+					},
+				},
+				{
+					Role: genai.RoleUser,
+					Parts: []*genai.Part{
+						{
+							FunctionResponse: &genai.FunctionResponse{
+								Name:     "glob",
+								Response: map[string]any{"output": "main.go\nutil.go"},
+							},
+						},
+					},
+				},
+				{
+					Role:  genai.RoleUser,
+					Parts: []*genai.Part{{Text: "Continue"}},
+				},
+			},
+		},
+		{
+			// Multiple tool results after a single assistant with N tool_calls
+			// must collapse into ONE role="user" content of function responses,
+			// followed by a separate role="user" content for the subsequent
+			// user text. This mirrors the exact shape observed in production.
+			name: "multiple tool results then user text split into two user contents",
+			messages: []openai.ChatCompletionMessageParamUnion{
+				{
+					OfUser: &openai.ChatCompletionUserMessageParam{
+						Role:    openai.ChatMessageRoleUser,
+						Content: openai.StringOrUserRoleContentUnion{Value: "search"},
+					},
+				},
+				{
+					OfAssistant: &openai.ChatCompletionAssistantMessageParam{
+						Role: openai.ChatMessageRoleAssistant,
+						ToolCalls: []openai.ChatCompletionMessageToolCallParam{
+							{
+								ID:       ptr.To("call_1"),
+								Function: openai.ChatCompletionMessageToolCallFunctionParam{Name: "glob", Arguments: "{\"pattern\":\"a\"}"},
+								Type:     openai.ChatCompletionMessageToolCallTypeFunction,
+							},
+							{
+								ID:       ptr.To("call_2"),
+								Function: openai.ChatCompletionMessageToolCallFunctionParam{Name: "glob", Arguments: "{\"pattern\":\"b\"}"},
+								Type:     openai.ChatCompletionMessageToolCallTypeFunction,
+							},
+						},
+					},
+				},
+				{
+					OfTool: &openai.ChatCompletionToolMessageParam{
+						ToolCallID: "call_1",
+						Content:    openai.ContentUnion{Value: "a.go"},
+					},
+				},
+				{
+					OfTool: &openai.ChatCompletionToolMessageParam{
+						ToolCallID: "call_2",
+						Content:    openai.ContentUnion{Value: "b.go"},
+					},
+				},
+				{
+					OfUser: &openai.ChatCompletionUserMessageParam{
+						Role:    openai.ChatMessageRoleUser,
+						Content: openai.StringOrUserRoleContentUnion{Value: "Continue"},
+					},
+				},
+			},
+			expectedContents: []genai.Content{
+				{
+					Role:  genai.RoleUser,
+					Parts: []*genai.Part{{Text: "search"}},
+				},
+				{
+					Role: genai.RoleModel,
+					Parts: []*genai.Part{
+						{
+							FunctionCall:     &genai.FunctionCall{Name: "glob", Args: map[string]any{"pattern": "a"}},
+							ThoughtSignature: dummyThoughtSignature,
+						},
+						{
+							FunctionCall: &genai.FunctionCall{Name: "glob", Args: map[string]any{"pattern": "b"}},
+						},
+					},
+				},
+				{
+					Role: genai.RoleUser,
+					Parts: []*genai.Part{
+						{
+							FunctionResponse: &genai.FunctionResponse{
+								Name:     "glob",
+								Response: map[string]any{"output": "a.go"},
+							},
+						},
+						{
+							FunctionResponse: &genai.FunctionResponse{
+								Name:     "glob",
+								Response: map[string]any{"output": "b.go"},
+							},
+						},
+					},
+				},
+				{
+					Role:  genai.RoleUser,
+					Parts: []*genai.Part{{Text: "Continue"}},
+				},
+			},
+		},
+		{
+			// Sanity check: without any interleaving tool result, consecutive
+			// user messages still coalesce into a single content — this is the
+			// pre-existing behavior and must be preserved.
+			name: "consecutive user messages without tools coalesce into one content",
+			messages: []openai.ChatCompletionMessageParamUnion{
+				{
+					OfUser: &openai.ChatCompletionUserMessageParam{
+						Role:    openai.ChatMessageRoleUser,
+						Content: openai.StringOrUserRoleContentUnion{Value: "hi"},
+					},
+				},
+				{
+					OfUser: &openai.ChatCompletionUserMessageParam{
+						Role:    openai.ChatMessageRoleUser,
+						Content: openai.StringOrUserRoleContentUnion{Value: "there"},
+					},
+				},
+			},
+			expectedContents: []genai.Content{
+				{
+					Role: genai.RoleUser,
+					Parts: []*genai.Part{
+						{Text: "hi"},
+						{Text: "there"},
+					},
+				},
+			},
+		},
+		{
+			// Regression against the reviewer's counter-example: when the
+			// client interleaves user text between two tool results
+			// (tool -> user -> tool), the two tool results must NOT coalesce
+			// into a single Gemini content. Message order must be preserved.
+			name: "tool then user then tool preserves order and does not coalesce tool results",
+			messages: []openai.ChatCompletionMessageParamUnion{
+				{
+					OfAssistant: &openai.ChatCompletionAssistantMessageParam{
+						Role: openai.ChatMessageRoleAssistant,
+						ToolCalls: []openai.ChatCompletionMessageToolCallParam{
+							{
+								ID:       ptr.To("call_1"),
+								Function: openai.ChatCompletionMessageToolCallFunctionParam{Name: "glob", Arguments: "{\"pattern\":\"a\"}"},
+								Type:     openai.ChatCompletionMessageToolCallTypeFunction,
+							},
+							{
+								ID:       ptr.To("call_2"),
+								Function: openai.ChatCompletionMessageToolCallFunctionParam{Name: "glob", Arguments: "{\"pattern\":\"b\"}"},
+								Type:     openai.ChatCompletionMessageToolCallTypeFunction,
+							},
+						},
+					},
+				},
+				{
+					OfTool: &openai.ChatCompletionToolMessageParam{
+						ToolCallID: "call_1",
+						Content:    openai.ContentUnion{Value: "a.go"},
+					},
+				},
+				{
+					OfUser: &openai.ChatCompletionUserMessageParam{
+						Role:    openai.ChatMessageRoleUser,
+						Content: openai.StringOrUserRoleContentUnion{Value: "wait"},
+					},
+				},
+				{
+					OfTool: &openai.ChatCompletionToolMessageParam{
+						ToolCallID: "call_2",
+						Content:    openai.ContentUnion{Value: "b.go"},
+					},
+				},
+				{
+					OfAssistant: &openai.ChatCompletionAssistantMessageParam{
+						Role:    openai.ChatMessageRoleAssistant,
+						Content: openai.StringOrAssistantRoleContentUnion{Value: "done"},
+					},
+				},
+			},
+			expectedContents: []genai.Content{
+				{
+					Role: genai.RoleModel,
+					Parts: []*genai.Part{
+						{
+							FunctionCall:     &genai.FunctionCall{Name: "glob", Args: map[string]any{"pattern": "a"}},
+							ThoughtSignature: dummyThoughtSignature,
+						},
+						{
+							FunctionCall: &genai.FunctionCall{Name: "glob", Args: map[string]any{"pattern": "b"}},
+						},
+					},
+				},
+				{
+					Role: genai.RoleUser,
+					Parts: []*genai.Part{
+						{
+							FunctionResponse: &genai.FunctionResponse{
+								Name:     "glob",
+								Response: map[string]any{"output": "a.go"},
+							},
+						},
+					},
+				},
+				{
+					Role:  genai.RoleUser,
+					Parts: []*genai.Part{{Text: "wait"}},
+				},
+				{
+					Role: genai.RoleUser,
+					Parts: []*genai.Part{
+						{
+							FunctionResponse: &genai.FunctionResponse{
+								Name:     "glob",
+								Response: map[string]any{"output": "b.go"},
+							},
+						},
+					},
+				},
+				{
+					Role:  genai.RoleModel,
+					Parts: []*genai.Part{{Text: "done"}},
+				},
+			},
+		},
 	}
 
 	for _, tc := range tests {

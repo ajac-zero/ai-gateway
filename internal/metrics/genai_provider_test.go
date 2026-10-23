@@ -23,11 +23,12 @@ func TestGenAIProviders_matchTracing(t *testing.T) {
 		span   otelgenai.Provider
 	}{
 		{genaiProviderOpenAI, otelgenai.ProviderOpenAI},
-		{genaiProviderAzureOpenAI, otelgenai.ProviderAzureOpenAI},
+		// Legacy metric series keep "azure.openai"; the current client series normalizes it.
+		{normalizeClientProvider(genaiProviderAzureOpenAI), otelgenai.ProviderAzureOpenAI},
 		{genaiProviderAWSBedrock, otelgenai.ProviderAWSBedrock},
-		{genaiProviderAWSAnthropic, otelgenai.ProviderAWSAnthropic},
+		{normalizeClientProvider(genaiProviderAWSAnthropic), otelgenai.ProviderAWSBedrock},
 		{genaiProviderGCPVertexAI, otelgenai.ProviderGCPVertexAI},
-		{genaiProviderGCPAnthropic, otelgenai.ProviderGCPAnthropic},
+		{normalizeClientProvider(genaiProviderGCPAnthropic), otelgenai.ProviderGCPVertexAI},
 		{genaiProviderAnthropic, otelgenai.ProviderAnthropic},
 		{genaiProviderCohere, otelgenai.ProviderCohere},
 		{genaiProviderTypeSafe, otelgenai.ProviderTypeSafe},

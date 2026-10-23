@@ -142,6 +142,7 @@ func TestChatCompletionsEndpointSpec_GetTranslator(t *testing.T) {
 		{Name: filterapi.APISchemaAzureOpenAI, Version: "2024-02-01"},
 		{Name: filterapi.APISchemaGCPVertexAI},
 		{Name: filterapi.APISchemaGCPAnthropic, Version: "2024-05-01"},
+		{Name: filterapi.APISchemaAnthropic, Prefix: "v1"},
 	}
 
 	for _, schema := range supported {
@@ -293,6 +294,12 @@ func TestImageGenerationEndpointSpec_GetTranslator(t *testing.T) {
 	_, err := spec.GetTranslator(filterapi.VersionedAPISchema{Name: filterapi.APISchemaOpenAI}, "override")
 	require.NoError(t, err)
 
+	_, err = spec.GetTranslator(filterapi.VersionedAPISchema{Name: filterapi.APISchemaGCPVertexAI}, "override")
+	require.NoError(t, err)
+
+	_, err = spec.GetTranslator(filterapi.VersionedAPISchema{Name: filterapi.APISchemaGoogleAIStudio, Version: "v1beta"}, "override")
+	require.NoError(t, err)
+
 	_, err = spec.GetTranslator(filterapi.VersionedAPISchema{Name: filterapi.APISchemaAzureOpenAI}, "override")
 	require.ErrorContains(t, err, "unsupported API schema")
 }
@@ -330,6 +337,7 @@ func TestMessagesEndpointSpec_GetTranslator(t *testing.T) {
 	spec := MessagesEndpointSpec{}
 	for _, schema := range []filterapi.VersionedAPISchema{
 		{Name: filterapi.APISchemaGCPAnthropic},
+		{Name: filterapi.APISchemaGCPVertexAI},
 		{Name: filterapi.APISchemaAWSAnthropic},
 		{Name: filterapi.APISchemaAnthropic},
 		{Name: filterapi.APISchemaOpenAI},     // This is for OpenAI-schema backends like vLLM that support the /v1/messages endpoint

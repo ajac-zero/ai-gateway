@@ -183,6 +183,84 @@ func TestWithTestUpstream(t *testing.T) {
 			expResponseBody: `{"error":{"type":"OpenAIBackendError","message":"backend timeout","code":"503"},"type":"error"}`,
 		},
 		{
+			name:              "gcp-vertexai - /v1/images/generations",
+			backend:           "gcp-vertexai",
+			path:              "/v1/images/generations",
+			method:            http.MethodPost,
+			requestBody:       `{"model":"gemini-2.5-flash-image","prompt":"a cat wearing sunglasses","size":"1536x1024"}`,
+			expRequestBody:    `{"contents":[{"parts":[{"text":"a cat wearing sunglasses"}],"role":"user"}],"tools":null,"generationConfig":{"responseModalities":["TEXT","IMAGE"],"imageConfig":{"aspectRatio":"3:2"}}}`,
+			expPath:           "/v1/projects/gcp-project-name/locations/gcp-region/publishers/google/models/gemini-2.5-flash-image:generateContent",
+			expRequestHeaders: map[string]string{"Authorization": "Bearer " + fakeGCPAuthToken},
+			responseStatus:    strconv.Itoa(http.StatusOK),
+			responseBody:      `{"candidates":[{"content":{"role":"model","parts":[{"text":"Here you go."},{"inlineData":{"mimeType":"image/png","data":"aW1hZ2Ux"}}]},"finishReason":"STOP"}],"createTime":"2026-10-02T12:00:00Z","usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":1290,"totalTokenCount":1297}}`,
+			expStatus:         http.StatusOK,
+			expResponseBody:   `{"created":1790942400,"data":[{"b64_json":"aW1hZ2Ux"}],"usage":{"total_tokens":1297,"input_tokens":7,"output_tokens":1290},"output_format":"png"}`,
+		},
+		{
+			name:              "gcp-vertexai - /v1/images/generations - upstream error mapped to OpenAI",
+			backend:           "gcp-vertexai",
+			path:              "/v1/images/generations",
+			method:            http.MethodPost,
+			requestBody:       `{"model":"gemini-2.5-flash-image","prompt":"a cat"}`,
+			expPath:           "/v1/projects/gcp-project-name/locations/gcp-region/publishers/google/models/gemini-2.5-flash-image:generateContent",
+			responseHeaders:   "content-type:application/json",
+			responseStatus:    strconv.Itoa(http.StatusBadRequest),
+			responseBody:      `{"error":{"code":400,"message":"Request contains an invalid argument.","status":"INVALID_ARGUMENT"}}`,
+			expStatus:         http.StatusBadRequest,
+			expResponseBody:   `{"type":"error","error":{"type":"INVALID_ARGUMENT","message":"Request contains an invalid argument.","code":"400"}}`,
+			expRequestHeaders: map[string]string{"Authorization": "Bearer " + fakeGCPAuthToken},
+		},
+		{
+			name:        "gcp-vertexai - /v1/images/generations - n greater than 1 rejected",
+			backend:     "gcp-vertexai",
+			path:        "/v1/images/generations",
+			method:      http.MethodPost,
+			requestBody: `{"model":"gemini-2.5-flash-image","prompt":"a cat","n":2}`,
+			expStatus:   http.StatusUnprocessableEntity,
+			expResponseBodyFunc: func(t require.TestingT, body []byte) {
+				require.Contains(t, string(body), "n=2 is not supported by GCP Vertex AI Gemini image models")
+			},
+		},
+		{
+			name:        "gcp-vertexai - /v1/images/generations - unsupported aspect ratio rejected",
+			backend:     "gcp-vertexai",
+			path:        "/v1/images/generations",
+			method:      http.MethodPost,
+			requestBody: `{"model":"gemini-2.5-flash-image","prompt":"a cat","size":"4000x1000"}`,
+			expStatus:   http.StatusUnprocessableEntity,
+			expResponseBodyFunc: func(t require.TestingT, body []byte) {
+				// The body must be valid JSON, so the message must not contain unescaped quotes.
+				var errResp openai.Error
+				require.NoError(t, json.Unmarshal(body, &errResp))
+				require.Contains(t, errResp.Error.Message, "size 4000x1000 does not match an aspect ratio supported by GCP Vertex AI Gemini image models")
+			},
+		},
+		{
+			name:               "gcp-vertexai - /v1/images/generations - safety block becomes 400",
+			backend:            "gcp-vertexai",
+			path:               "/v1/images/generations",
+			method:             http.MethodPost,
+			requestBody:        `{"model":"gemini-2.5-flash-image","prompt":"something disallowed"}`,
+			expPath:            "/v1/projects/gcp-project-name/locations/gcp-region/publishers/google/models/gemini-2.5-flash-image:generateContent",
+			responseStatus:     strconv.Itoa(http.StatusOK),
+			responseBody:       `{"candidates":[{"content":{"role":"model","parts":[{"text":"I can't help with that."}]},"finishReason":"IMAGE_SAFETY"}],"usageMetadata":{"promptTokenCount":5,"totalTokenCount":5}}`,
+			expStatus:          http.StatusBadRequest,
+			expResponseBody:    `{"type":"error","error":{"type":"content_policy_violation","code":"400","message":"GCP Vertex AI returned no image: finish reason IMAGE_SAFETY. Model text: I can't help with that."}}`,
+			expResponseHeaders: map[string]string{"Content-Type": "application/json"},
+		},
+		{
+			name:            "gcp-vertexai - /v1/images/generations - text-only answer becomes 502",
+			backend:         "gcp-vertexai",
+			path:            "/v1/images/generations",
+			method:          http.MethodPost,
+			requestBody:     `{"model":"gemini-2.5-flash-image","prompt":"a cat"}`,
+			expPath:         "/v1/projects/gcp-project-name/locations/gcp-region/publishers/google/models/gemini-2.5-flash-image:generateContent",
+			responseStatus:  strconv.Itoa(http.StatusOK),
+			responseBody:    `{"candidates":[{"content":{"role":"model","parts":[{"text":"Which cat?"}]},"finishReason":"STOP"}]}`,
+			expStatus:       http.StatusBadGateway,
+			expResponseBody: `{"type":"error","error":{"type":"GCPVertexAIBackendError","code":"502","message":"GCP Vertex AI returned no image: finish reason STOP. Model text: Which cat?"}}`,
+		},
+		{
 			name:            "unknown path",
 			path:            "/unknown",
 			requestBody:     `{"prompt": "hello"}`,
@@ -473,6 +551,20 @@ func TestWithTestUpstream(t *testing.T) {
 			expResponseBody:   `{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"Hello from Anthropic!","role":"assistant"}}],"created":123, "id":"msg_123","model":"claude-3-sonnet","object":"chat.completion","usage":{"completion_tokens":25,"completion_tokens_details":{},"prompt_tokens":10,"total_tokens":35,"prompt_tokens_details":{}}}`,
 		},
 		{
+			name:              "anthropic - /v1/chat/completions",
+			backend:           "anthropic",
+			path:              "/v1/chat/completions",
+			method:            http.MethodPost,
+			requestBody:       `{"model":"claude-direct-test","max_tokens":1024,"messages":[{"role":"user","content":"Hello!"}]}`,
+			expRequestBody:    `{"max_tokens":1024,"messages":[{"content":[{"text":"Hello!","type":"text"}],"role":"user"}],"model":"claude-direct-test"}`,
+			expPath:           "/v1/messages",
+			expRequestHeaders: map[string]string{"x-api-key": "anthropic-api-key", "anthropic-version": "2023-06-01"},
+			responseStatus:    strconv.Itoa(http.StatusOK),
+			responseBody:      `{"id":"msg_456","type":"message","role":"assistant","model":"claude-sonnet-4-5-20250929","stop_reason":"end_turn","content":[{"type":"text","text":"Hello from Anthropic!"}],"usage":{"input_tokens":10,"output_tokens":25}}`,
+			expStatus:         http.StatusOK,
+			expResponseBody:   `{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"Hello from Anthropic!","role":"assistant"}}],"created":123,"id":"msg_456","model":"claude-sonnet-4-5-20250929","object":"chat.completion","usage":{"completion_tokens":25,"completion_tokens_details":{},"prompt_tokens":10,"total_tokens":35,"prompt_tokens_details":{}}}`,
+		},
+		{
 			name:              "gcp-anthropicai - /v1/chat/completions - with cache",
 			backend:           "gcp-anthropicai",
 			path:              "/v1/chat/completions",
@@ -697,6 +789,40 @@ data: [DONE]
 `,
 		},
 		{
+			name:              "anthropic - /v1/chat/completions - streaming",
+			backend:           "anthropic",
+			path:              "/v1/chat/completions",
+			method:            http.MethodPost,
+			responseType:      "sse",
+			requestBody:       `{"model":"claude-direct-test","max_tokens":1024,"messages":[{"role":"user","content":"Hello!"}],"stream":true}`,
+			expRequestBody:    `{"max_tokens":1024,"messages":[{"content":[{"text":"Hello!","type":"text"}],"role":"user"}],"model":"claude-direct-test","stream":true}`,
+			expPath:           "/v1/messages",
+			expRequestHeaders: map[string]string{"x-api-key": "anthropic-api-key", "anthropic-version": "2023-06-01"},
+			responseStatus:    strconv.Itoa(http.StatusOK),
+			responseBody: `event: message_start
+data: {"type":"message_start","message":{"id":"msg_456","model":"claude-sonnet-4-5-20250929","usage":{"input_tokens":10,"output_tokens":0}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello!"}}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":4}}
+
+event: message_stop
+data: {"type":"message_stop"}
+`,
+			expStatus: http.StatusOK,
+			expResponseBody: `data: {"id":"msg_456","choices":[{"index":0,"delta":{"content":"Hello!","role":"assistant"}}],"created":123,"model":"claude-sonnet-4-5-20250929","object":"chat.completion.chunk"}
+
+data: {"id":"msg_456","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"created":123,"model":"claude-sonnet-4-5-20250929","object":"chat.completion.chunk"}
+
+data: {"id":"msg_456","choices":[],"created":123,"model":"claude-sonnet-4-5-20250929","object":"chat.completion.chunk","usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14,"completion_tokens_details":{},"prompt_tokens_details":{}}}
+
+data: [DONE]
+
+`,
+		},
+		{
 			name:         "gcp-anthropicai - /v1/chat/completions - streaming tool use",
 			backend:      "gcp-anthropicai",
 			path:         "/v1/chat/completions",
@@ -812,6 +938,19 @@ data: [DONE]
 			expStatus:       http.StatusBadRequest,
 			responseBody:    `{"error":{"type":"invalid_request_error","code":400,"message":"Invalid request: missing required field","status":"INVALID_ARGUMENT"}}`,
 			expResponseBody: `{"type":"error","error":{"type":"invalid_request_error","code":"400","message":"Invalid request: missing required field"}}`,
+		},
+		{
+			name:              "anthropic - /v1/chat/completions - error response",
+			backend:           "anthropic",
+			path:              "/v1/chat/completions",
+			method:            http.MethodPost,
+			requestBody:       `{"model":"claude-direct-test","max_tokens":1024,"messages":[{"role":"user","content":"Hello!"}]}`,
+			expPath:           "/v1/messages",
+			expRequestHeaders: map[string]string{"x-api-key": "anthropic-api-key", "anthropic-version": "2023-06-01"},
+			responseStatus:    strconv.Itoa(http.StatusBadRequest),
+			responseBody:      `{"type":"error","error":{"type":"invalid_request_error","message":"Invalid request"}}`,
+			expStatus:         http.StatusBadRequest,
+			expResponseBody:   `{"type":"error","error":{"type":"invalid_request_error","code":"400","message":"Invalid request"}}`,
 		},
 		{
 			name:            "openai - /v1/embeddings",
