@@ -12,9 +12,12 @@ This guide provides an overview of the metrics collected by the AI Gateway and h
 
 ## Overview
 
-Agent Router is designed to intercept and process AI/LLM requests, that enables it to collect metrics for monitoring and observability.
-Currently, it collects metrics and exports them to Prometheus for monitoring in the OpenTelemetry format as specified by the [OpenTelemetry Gen AI Semantic Conventions](https://opentelemetry.io/docs/specs/semconv/attributes-registry/gen-ai/).
-Not all metrics are supported yet, but the Agent Router will continue to add more metrics in the future.
+Agent Router intercepts model-provider requests and exports metrics to
+Prometheus and configured OpenTelemetry metric exporters. It emits the existing
+gateway GenAI metrics alongside the current client-side metrics from the
+[OpenTelemetry GenAI semantic conventions](https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-metrics.md).
+The GenAI conventions are still under development, so names and requirements
+may evolve.
 
 ### Supported Endpoints
 
@@ -23,23 +26,31 @@ Metrics are collected for the following LLM endpoints:
 - **`/v1/chat/completions`** - Chat completions (streaming and non-streaming)
 - **`/v1/completions`** - Legacy text completions (streaming and non-streaming)
 - **`/v1/embeddings`** - Text embeddings
+- **`/v1/responses`** - Responses (streaming and non-streaming)
+- **`/v1/images/generations`**, `/v1/audio/speech`, `/v1/audio/transcriptions`, and `/v1/audio/translations` - Image/audio operations
 - **`/cohere/v2/rerank`** - Rerank
 - **`/typesafe/v1/systemone`** - TypeSafe System One (Jev)
-- **`/anthropic/v1/messages`** - Anthropic messages (streaming and non-streaming)
+- **`/anthropic/v1/messages`** and Anthropic `count_tokens` - Messages and token counting
 
 For example, the Agent Router collects metrics such as:
 
 - [**`gen_ai.client.token.usage`**](https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-metrics/#metric-gen_aiclienttokenusage): Number of tokens processed. The attribute `gen_ai.token.type` can be used to differentiate between input, output, and total tokens.
+- **`gen_ai.client.operation.duration`**: Duration of each provider operation, with a low-cardinality error type on failures.
+- **`gen_ai.client.operation.time_to_first_chunk`** and **`gen_ai.client.operation.time_per_output_chunk`**: Streaming response chunk timing.
+- **`gen_ai.client.inference.usage.input_tokens`** and **`gen_ai.client.inference.usage.output_tokens`**: Provider-reported inference token counters; modality is `unknown` when the provider does not report it.
+- **`gen_ai.client.inference.usage.cache_read.input_tokens`**, **`gen_ai.client.inference.usage.cache_write.input_tokens`**, and **`gen_ai.client.inference.usage.reasoning.output_tokens`**: Available cache/reasoning subsets, recorded in addition to their input/output totals.
+- **`gen_ai.client.inference.operation.input_tokens`** and **`gen_ai.client.inference.operation.output_tokens`**: Per-operation input/output token histograms.
 - [**`gen_ai.server.request.duration`**](https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-metrics/#metric-gen_aiserverrequestduration): Measured from the start of the received request headers in the Agent Router filter to the end of the processed response body processing.
 - [**`gen_ai.server.time_to_first_token`**](https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-metrics/#metric-gen_aiservertime_to_first_token): Measured from the start of the received request headers in the Agent Router filter to the receiving of the first token in the response body handling.
 - [**`gen_ai.server.time_per_output_token`**](https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-metrics/#metric-gen_aiservertime_per_output_token): The latency between consecutive tokens, if supported, or by chunks/tokens otherwise.
 
-Each metric comes with some default attributes such as:
+The established gateway-side metrics include request attributes such as:
 
 - `gen_ai.operation.name`
   - `chat`: For `/v1/chat/completions` endpoint.
   - `completion`: For `/v1/completions` endpoint.
-  - `embedding`: For `/v1/embeddings` endpoint.
+  - `embeddings`: For `/v1/embeddings` endpoint.
+  - `responses`: For `/v1/responses` endpoint.
   - `rerank`: For `/cohere/v2/rerank` endpoint.
   - `systemone`: For `/typesafe/v1/systemone` endpoint.
   - `image_generation`: For `/v1/images/generations` endpoint.
@@ -49,6 +60,24 @@ Each metric comes with some default attributes such as:
 - `gen_ai.response.model` - The model name returned in the response
 - `gen_ai.provider.name` - The provider name (e.g., `openai`, `anthropic`)
 - `gen_ai.backend` - The `AIServiceBackend` that served the request, as `namespace/name`
+
+The current client-side metric series use normalized provider and operation
+names (`chat`, `text_completion`, `embeddings`, and the corresponding provider
+registry values). They include `gen_ai.request.model` and
+`gen_ai.response.model` when known, but intentionally omit gateway-specific
+`gen_ai.original.model`, `gen_ai.backend`, and custom request-header labels.
+The older `gen_ai.client.token.usage` and gateway-side
+`gen_ai.server.*` series remain available; they are not replacements for the
+new client-side series. Token metrics require usage reported by the provider,
+and chunk timing is recorded only for streams. Input/output token totals already
+include cache and reasoning subsets; do not add those subset counters again
+when calculating total consumption.
+
+MCP requests are measured separately with **`mcp.client.operation.duration`**
+for gateway-to-backend operations and **`mcp.server.operation.duration`** for
+client-to-gateway operations. These use MCP method/tool/prompt names and
+low-cardinality error attributes; they do not include gateway-specific backend
+or request-header labels.
 
 :::tip
 
