@@ -418,6 +418,7 @@ func TestMCPTracer_SpanName(t *testing.T) {
 
 			require.Equal(t, tt.expectedSpanName, actualSpan.Name)
 			require.Equal(t, oteltrace.SpanKindClient, actualSpan.SpanKind)
+			require.Equal(t, codes.Unset, actualSpan.Status.Code)
 		})
 	}
 }
@@ -450,11 +451,14 @@ func TestMCPTracer_StaticAttributes(t *testing.T) {
 
 	attrs := exported().Attributes
 	require.Contains(t, attrs, attribute.String("mcp.method.name", "tools/list"))
-	require.Contains(t, attrs, attribute.String("mcp.protocol.version", "2025-06-18"))
-	require.Contains(t, attrs, attribute.String("jsonrpc.request.id", "{test-id}"))
-	require.Contains(t, attrs, attribute.String("network.transport", "tcp"))
-	require.Contains(t, attrs, attribute.String("network.protocol.name", "http"))
-	require.Contains(t, attrs, attribute.String("network.protocol.version", "1.1"))
+	require.Contains(t, attrs, attribute.String("jsonrpc.request.id", "test-id"))
+	// Values the gateway cannot know are not reported.
+	for _, a := range attrs {
+		require.NotContains(t, []string{
+			"mcp.protocol.version", "network.transport", "network.protocol.name",
+			"network.protocol.version", "server.address", "server.port",
+		}, string(a.Key))
+	}
 	// The legacy custom keys must be gone.
 	for _, a := range attrs {
 		require.NotEqual(t, "mcp.transport", string(a.Key))
@@ -469,8 +473,8 @@ func TestMCPSpan_EndSpanOnError(t *testing.T) {
 
 		stub := exported()
 		require.Equal(t, codes.Error, stub.Status.Code)
-		require.Contains(t, stub.Attributes, attribute.String("error.type", "invalid_param"))
-		require.Contains(t, stub.Attributes, attribute.Int64("rpc.response.status_code", -32602))
+		require.Contains(t, stub.Attributes, attribute.String("error.type", "-32602"))
+		require.Contains(t, stub.Attributes, attribute.String("rpc.response.status_code", "-32602"))
 		require.Contains(t, stub.Events[0].Attributes, attribute.String("exception.type", "invalid_param"))
 	})
 
@@ -484,7 +488,29 @@ func TestMCPSpan_EndSpanOnError(t *testing.T) {
 			require.NotEqual(t, "rpc.response.status_code", string(a.Key))
 		}
 	})
+
+	t.Run("tool error is low-cardinality and does not expose result content", func(t *testing.T) {
+		const secret = "sensitive tool result"
+		span, exported := newTestMCPSpan(t, "tools/call", &mcp.CallToolParams{Name: "fake-tool"})
+		span.EndSpanOnError("internal_error", testMCPToolError{message: secret})
+
+		stub := exported()
+		require.Equal(t, codes.Error, stub.Status.Code)
+		require.Equal(t, "tool_error", stub.Status.Description)
+		require.Contains(t, stub.Attributes, attribute.String("error.type", "tool_error"))
+		require.Contains(t, stub.Events[0].Attributes, attribute.String("exception.type", "tool_error"))
+		require.Contains(t, stub.Events[0].Attributes, attribute.String("exception.message", "tool_error"))
+		require.NotContains(t, stub.Status.Description, secret)
+		for _, attr := range stub.Events[0].Attributes {
+			require.NotContains(t, attr.Value.AsString(), secret)
+		}
+	})
 }
+
+type testMCPToolError struct{ message string }
+
+func (e testMCPToolError) Error() string      { return e.message }
+func (testMCPToolError) IsMCPToolError() bool { return true }
 
 func TestMCPSpan_RecordRouteToBackend(t *testing.T) {
 	span, exported := newTestMCPSpan(t, "tools/call", &mcp.CallToolParams{Name: "fake-tool"})
@@ -685,4 +711,51 @@ func TestMCPSpan_NoServerPeer(t *testing.T) {
 		require.NotEqual(t, "server.address", string(a.Key))
 		require.NotEqual(t, "server.port", string(a.Key))
 	}
+}
+
+func TestMCPTracer_OTelKnownProtocolAndIDAndPromptVariables(t *testing.T) {
+	t.Run("initialize reports client-declared protocol version", func(t *testing.T) {
+		span, exported := newTestMCPSpan(t, "initialize", &mcp.InitializeParams{ProtocolVersion: "2025-06-18"})
+		span.EndSpan()
+		require.Contains(t, exported().Attributes, attribute.String("mcp.protocol.version", "2025-06-18"))
+	})
+
+	t.Run("notification has no request id", func(t *testing.T) {
+		attrs := otelMCPRequestAttributes(&jsonrpc.Request{Method: "notifications/initialized"}, &mcp.InitializedParams{}, false)
+		require.Equal(t, []attribute.KeyValue{attribute.String("mcp.method.name", "notifications/initialized")}, attrs)
+	})
+
+	p := &mcp.GetPromptParams{Name: "p", Arguments: map[string]string{"b": "2", "a": "1"}}
+	t.Run("prompt variables gated by content opt-in", func(t *testing.T) {
+		require.Equal(t, []attribute.KeyValue{attribute.String("gen_ai.prompt.name", "p")}, otelMCPParamsAttributes(p, false))
+		require.Equal(t, []attribute.KeyValue{
+			attribute.String("gen_ai.prompt.name", "p"),
+			attribute.String("gen_ai.prompt.variable.a", "1"),
+			attribute.String("gen_ai.prompt.variable.b", "2"),
+		}, otelMCPParamsAttributes(p, true))
+	})
+}
+
+func TestMCPTracer_OTelMetaPropagationAndResultGate(t *testing.T) {
+	for _, capture := range []bool{false, true} {
+		params := &mcp.CallToolParams{Name: "t"}
+		span, exported := newTestMCPSpanWithCapture(t, "tools/call", params, capture)
+		// Context is injected into params._meta regardless of the content opt-in.
+		require.Contains(t, params.GetMeta(), "traceparent")
+		span.RecordToolCallResult([]byte(`{"ok":true}`))
+		span.EndSpan()
+		var has bool
+		for _, a := range exported().Attributes {
+			if a.Key == "gen_ai.tool.call.result" {
+				has = true
+			}
+		}
+		require.Equal(t, capture, has)
+	}
+}
+
+func TestMCPSpan_EndSpanOnError_NonJSONRPCKeepsClass(t *testing.T) {
+	span, exported := newTestMCPSpan(t, "tools/call", &mcp.CallToolParams{Name: "t"})
+	span.EndSpanOnError("internal_error", errors.New("boom"))
+	require.Contains(t, exported().Attributes, attribute.String("error.type", "internal_error"))
 }

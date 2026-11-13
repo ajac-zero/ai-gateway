@@ -45,10 +45,6 @@ func TestMCPAttributeNames_matchSemconv(t *testing.T) {
 
 		{ours: "error.type", expected: string(semconv.ErrorTypeKey)},
 		{ours: "rpc.response.status_code", expected: string(semconv.RPCResponseStatusCodeKey)},
-
-		{ours: "network.transport", expected: string(semconv.NetworkTransportKey)},
-		{ours: "network.protocol.name", expected: string(semconv.NetworkProtocolNameKey)},
-		{ours: "network.protocol.version", expected: string(semconv.NetworkProtocolVersionKey)},
 	}
 
 	for _, tc := range tests {

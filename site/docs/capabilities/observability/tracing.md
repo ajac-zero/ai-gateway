@@ -18,20 +18,27 @@ export them to your choice of OpenTelemetry collector.
 Agent Router's router joins and records distributed traces when supplied
 with an [OpenTelemetry](https://opentelemetry.io/) collector endpoint.
 
-Requests to the OpenAI Chat Completions, Completions (legacy), and Embeddings
-endpoints are recorded as Spans which include typical timing and request
-details. In addition, there are GenAI attributes representing the LLM or
-Embeddings call including full request and response details, defined by
-[OpenInference semantic conventions][openinference].
+Requests to supported model-provider endpoints are recorded as client spans,
+including OpenAI Chat Completions, Completions, Embeddings, Responses, image
+generation and audio; Anthropic Messages and token counting; Cohere rerank; and
+TypeSafe System One. Spans include operation, model, provider, usage and
+request/response metadata. Streaming responses are folded into the same
+attributes as their unary equivalents where the API supplies a terminal
+response.
 
-OpenInference attributes default to include full request and response data for
-both chat completions and embeddings. This can be toggled with configuration,
-but when enabled allows systems like [Arize Phoenix][phoenix] to perform
-evaluations of production requests captured in OpenTelemetry spans.
+The default vocabulary is OpenInference. You can opt into the OpenTelemetry
+GenAI conventions with `AI_GATEWAY_TRACING_SEMCONV=gen_ai`; the two vocabularies
+are mutually exclusive. OpenInference content visibility is controlled by its
+privacy settings, while GenAI content capture is disabled unless explicitly
+enabled below.
 
-For chat completions, this includes traditional LLM metrics such as correctness
-and hallucination detection. For embeddings, it enables agentic RAG evaluations
-focused on retrieval and semantic analysis.
+These are provider-boundary spans, not a complete trace of an agent's execution.
+Planning, workflow or agent invocation, framework-local tool scheduling,
+evaluation, and memory operations happen in the agent application and must be
+instrumented there. Propagate W3C trace context from that instrumentation so
+application spans can join with the gateway's provider and MCP spans. This
+separation avoids attributing runtime behavior to a gateway that cannot observe
+it.
 
 ## Trying it out
 
@@ -163,10 +170,11 @@ extProc:
 Token counts and sampling parameters are recorded either way, since the
 conventions treat those as metadata rather than content.
 
-Message content is currently mapped for chat completions and Anthropic
-messages. Other endpoints record operation, model, usage and sampling
-parameters. Several — image generation, speech, transcription, translation and
-rerank and TypeSafe System One — have no content attributes defined by the conventions at all.
+Message content is currently mapped for chat completions, legacy completions,
+Responses, Anthropic Messages, and Anthropic `count_tokens`. Other endpoints
+record the metadata and usage their API exposes. Image/audio generation,
+speech, transcription, translation, rerank, embeddings, and TypeSafe System One
+do not currently have mapped conversation-content attributes.
 
 The `OPENINFERENCE_HIDE_*` variables described below apply only to the
 OpenInference convention. They have no effect when `gen_ai` is selected.
@@ -184,8 +192,8 @@ the [OpenTelemetry MCP semantic conventions][otel-mcp].
 | Tool name     | `mcp.tool.name`           | `gen_ai.tool.name` + `gen_ai.operation.name`   |
 | Prompt name   | `mcp.prompt.name`         | `gen_ai.prompt.name`                           |
 | Request ID    | `mcp.request.id`          | `jsonrpc.request.id`                           |
-| Transport     | `mcp.transport`           | `network.transport`, `network.protocol.*`      |
-| Errors        | `exception` event         | `error.type`, `rpc.response.status_code`       |
+| Transport     | `mcp.transport`           | network attributes omitted when unavailable   |
+| Errors        | `exception` event         | `error.type`; JSON-RPC errors include status code; tool failures use `tool_error` |
 | Session       | on the per-backend event  | also `mcp.session.id` on the span              |
 | List sizes    | not recorded              | `mcp.tools.count`, `mcp.resources.count`, ...  |
 | Tool call I/O | not recorded              | `gen_ai.tool.call.arguments`/`.result`, opt-in |
@@ -193,6 +201,12 @@ the [OpenTelemetry MCP semantic conventions][otel-mcp].
 Tool call arguments and results are message content, so under `gen_ai` they
 follow the same `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` opt-in as
 the LLM endpoints. The default convention never records them.
+
+Successful MCP spans leave status unset, as recommended by the OpenTelemetry
+API. A tool result with `isError: true` is classified as `tool_error`; its
+returned content is not copied into span status or exception messages. MCP
+`mcp.client.operation.duration` and `mcp.server.operation.duration` metrics are
+also emitted for gateway-to-backend and client-to-gateway operations.
 
 :::note Deprecation
 The gateway-specific MCP attributes are deprecated in favor of the OpenTelemetry
@@ -231,6 +245,9 @@ extProc:
       value: "true" # Hide embeddings input
     - name: OPENINFERENCE_HIDE_EMBEDDINGS_VECTORS
       value: "true" # Hide embeddings output
+    # Bound span size when clients pass many tool/function schemas
+    - name: OPENINFERENCE_HIDE_TOOLS
+      value: "true" # Omit llm.tools.N.tool.json_schema attributes
 ```
 
 Note: Hiding inputs/outputs prevents human or LLM-as-a-Judge evaluation of your

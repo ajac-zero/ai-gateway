@@ -396,6 +396,12 @@ func Main(ctx context.Context, args []string, stderr io.Writer) (err error) {
 	server.RegisterPrefix(path.Join(flags.rootPrefix, endpointPrefixes.OpenAI, "/v1/files"),
 		extproc.NewFilesProcessorFactory(flagFileIDCodec))
 
+	generateContentMetricsFactory := metrics.NewMetricsFactory(meter, metricsRequestHeaderAttributes, metrics.GenAIOperationGenerateContent)
+	// IMPORTANT: do NOT use path.Join for the trailing "/models/" segment —
+	// path.Join would strip the trailing slash needed to prevent prefix collisions.
+	geminiModelPrefix := strings.TrimRight(path.Join(flags.rootPrefix, endpointPrefixes.Gemini), "/") + "/models/"
+	server.RegisterPrefix(geminiModelPrefix, extproc.NewGeminiProcessorFactory(generateContentMetricsFactory))
+
 	// Create and register gRPC server with ExternalProcessorServer (the service Envoy calls).
 	serverConfigReceiver := newFileIDSeedWarner(server, l, flags.fileIDEncryptionSeed)
 	if err = filterapi.StartConfigBundleWatcher(ctx, flags.configBundlePath, serverConfigReceiver, l, time.Second*5); err != nil {

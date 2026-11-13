@@ -62,6 +62,12 @@ aws_secret_access_key = test
 				OpenAIAuth: &filterapi.OpenAIAuth{AccessToken: "some-access-token", Organization: "org-123"},
 			},
 		},
+		{
+			name: "GoogleAIKey",
+			config: &filterapi.BackendAuth{
+				GoogleAIKey: &filterapi.GoogleAIKeyAuth{Key: "TEST"},
+			},
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := NewHandler(t.Context(), tt.config)
