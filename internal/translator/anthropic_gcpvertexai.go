@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -70,6 +71,9 @@ func (a *anthropicToGCPVertexAITranslator) RequestBody(_ []byte, body *anthropic
 	if err != nil {
 		return nil, nil, err
 	}
+	// The thinking level is derived from output_config.effort below, with Anthropic
+	// semantics, so keep the OpenAI-path mapping (which rejects xhigh and max) out of it.
+	openAIReq.ReasoningEffort = ""
 	gcpReq, err := a.geminiTranslator.openAIMessageToGeminiMessage(openAIReq, a.requestModel)
 	if err != nil {
 		return nil, nil, err
@@ -87,11 +91,11 @@ func (a *anthropicToGCPVertexAITranslator) RequestBody(_ []byte, body *anthropic
 		topK := float32(*body.TopK)
 		gcpReq.GenerationConfig.TopK = &topK
 	}
-	if body.Thinking != nil {
+	if tc := anthropicThinkingToGemini(body, a.requestModel); tc != nil {
 		if gcpReq.GenerationConfig == nil {
 			gcpReq.GenerationConfig = &genai.GenerationConfig{}
 		}
-		gcpReq.GenerationConfig.ThinkingConfig = anthropicThinkingToGemini(body.Thinking)
+		gcpReq.GenerationConfig.ThinkingConfig = tc
 	}
 
 	a.geminiTranslator.requestModel = a.requestModel
@@ -160,9 +164,6 @@ func validateAnthropicToGCPVertexAIRequest(body *anthropic.MessagesRequest) erro
 		}
 	}
 	if body.Thinking != nil {
-		if body.Thinking.Adaptive != nil {
-			return fmt.Errorf("%w: Anthropic thinking type adaptive is not supported for GCP Vertex AI", internalapi.ErrInvalidRequestBody)
-		}
 		if body.Thinking.Enabled != nil {
 			budget := body.Thinking.Enabled.BudgetTokens
 			if budget < 0 || budget > maxInt32 || math.Trunc(budget) != budget {
@@ -258,16 +259,72 @@ func validateAnthropicToolResultForGCPVertexAI(toolResult *anthropic.ToolResultB
 	return nil
 }
 
-func anthropicThinkingToGemini(thinking *anthropic.Thinking) *genai.ThinkingConfig {
-	if thinking == nil {
-		return nil
+// geminiMajorVersionRe extracts the major version from a Gemini model name such as "gemini-4-neon".
+var geminiMajorVersionRe = regexp.MustCompile(`gemini-(\d+)`)
+
+// supportsThinkingLevel reports whether the model takes thinkingLevel (Gemini 3 and later).
+// Earlier models reject it and only support thinkingBudget.
+// https://docs.cloud.google.com/vertex-ai/generative-ai/docs/thinking
+func supportsThinkingLevel(model internalapi.RequestModel) bool {
+	m := geminiMajorVersionRe.FindStringSubmatch(strings.ToLower(model))
+	if m == nil {
+		return false
 	}
-	if thinking.Enabled != nil {
+	major, err := strconv.Atoi(m[1])
+	return err == nil && major >= 3
+}
+
+// anthropicEffortToThinkingLevel maps output_config.effort to a Gemini thinking level.
+// Gemini only defines MINIMAL, LOW, MEDIUM and HIGH, and HIGH is the maximum, so
+// xhigh and max both map to HIGH. Models without a MEDIUM level get HIGH for medium.
+func anthropicEffortToThinkingLevel(effort anthropic.OutputConfigEffort, model internalapi.RequestModel) genai.ThinkingLevel {
+	switch effort {
+	case anthropic.OutputConfigEffortLow:
+		return genai.ThinkingLevelLow
+	case anthropic.OutputConfigEffortMedium:
+		if supportsMediumThinkingLevel(model) {
+			return genai.ThinkingLevelMedium
+		}
+		return genai.ThinkingLevelHigh
+	case anthropic.OutputConfigEffortHigh, anthropic.OutputConfigEffortXhigh, anthropic.OutputConfigEffortMax:
+		return genai.ThinkingLevelHigh
+	}
+	return ""
+}
+
+// anthropicThinkingToGemini builds the Gemini thinkingConfig from the Anthropic thinking
+// and output_config.effort fields. It returns nil when neither applies.
+//
+//   - disabled: thoughts off; effort is ignored.
+//   - enabled: thoughts on. On Gemini 3+ an effort sets thinkingLevel and takes precedence over
+//     budget_tokens, because Vertex rejects thinkingLevel together with thinkingBudget; without
+//     effort, budget_tokens maps to thinkingBudget.
+//   - adaptive: thoughts on, with the level derived from effort (model default without effort).
+//   - absent: effort alone sets the level without requesting thought summaries.
+//
+// Models before Gemini 3 do not support thinkingLevel, so effort is ignored for them.
+func anthropicThinkingToGemini(body *anthropic.MessagesRequest, model internalapi.RequestModel) *genai.ThinkingConfig {
+	var level genai.ThinkingLevel
+	if body.OutputConfig != nil && supportsThinkingLevel(model) {
+		level = anthropicEffortToThinkingLevel(body.OutputConfig.Effort, model)
+	}
+	thinking := body.Thinking
+	switch {
+	case thinking == nil:
+		if level == "" {
+			return nil
+		}
+		return &genai.ThinkingConfig{ThinkingLevel: level}
+	case thinking.Disabled != nil:
+		return &genai.ThinkingConfig{IncludeThoughts: false}
+	case thinking.Enabled != nil:
+		if level != "" {
+			return &genai.ThinkingConfig{IncludeThoughts: true, ThinkingLevel: level}
+		}
 		budget := int32(thinking.Enabled.BudgetTokens) //nolint:gosec // validated before conversion.
 		return &genai.ThinkingConfig{IncludeThoughts: true, ThinkingBudget: &budget}
-	}
-	if thinking.Disabled != nil {
-		return &genai.ThinkingConfig{IncludeThoughts: false}
+	case thinking.Adaptive != nil:
+		return &genai.ThinkingConfig{IncludeThoughts: true, ThinkingLevel: level}
 	}
 	return nil
 }

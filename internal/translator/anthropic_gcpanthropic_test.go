@@ -781,3 +781,24 @@ data: {"type": "message_stop"}
 	assert.True(t, cacheCreationSet, "cache creation tokens should be set")
 	assert.Equal(t, uint32(1), cacheCreationTokens, "No cache creation tokens in this scenario")
 }
+
+// Claude on Vertex receives output_config and adaptive thinking untouched; only the Gemini
+// translator interprets them.
+func TestAnthropicToGCPAnthropicTranslator_RequestBody_PassesThroughEffortAndAdaptiveThinking(t *testing.T) {
+	parsedReq := &anthropic.MessagesRequest{
+		Model:        "claude-opus-4-5",
+		MaxTokens:    100,
+		Messages:     []anthropic.MessageParam{{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Hi"}}},
+		Thinking:     &anthropic.Thinking{Adaptive: &anthropic.ThinkingAdaptive{Type: "adaptive"}},
+		OutputConfig: &anthropic.OutputConfig{Effort: anthropic.OutputConfigEffortXhigh},
+	}
+	raw, err := json.Marshal(parsedReq)
+	require.NoError(t, err)
+
+	_, body, err := NewAnthropicToGCPAnthropicTranslator("2023-06-01", "").RequestBody(raw, parsedReq, false)
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(body, &got))
+	require.Equal(t, map[string]any{"type": "adaptive"}, got["thinking"])
+	require.Equal(t, map[string]any{"effort": "xhigh"}, got["output_config"])
+}
