@@ -6,7 +6,11 @@
 package translator
 
 import (
+	"bytes"
+	"encoding/base64"
 	"fmt"
+	"image/color"
+	imagepng "image/png"
 	"strconv"
 	"strings"
 	"testing"
@@ -1184,6 +1188,161 @@ func TestAnthropicToGCPVertexAI_RequestBodyToolResultImages(t *testing.T) {
 			_, err := build(tc.model, result("t1", tc.item), result("t2", txt("x")))
 			require.ErrorIs(t, err, internalapi.ErrInvalidRequestBody)
 			require.ErrorContains(t, err, tc.wantErr)
+		})
+	}
+}
+
+// quadrantPNG is a real 8x8 PNG: red top-left, green top-right, blue bottom-left, yellow bottom-right.
+const quadrantPNG = "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAHElEQVR4nGP4z8AARwz/cSAKJZB5//8zwBEVJQC2jU+xpR5PuwAAAABJRU5ErkJggg=="
+
+func TestAnthropicToGCPVertexAI_ToolResultImagesAcrossTurnsAndOrder(t *testing.T) {
+	png := func() anthropicschema.ToolResultContentItem {
+		return anthropicschema.ToolResultContentItem{Image: &anthropicschema.ImageBlockParam{Type: "image", Source: anthropicschema.ImageSource{
+			Base64: &anthropicschema.Base64ImageSource{Type: "base64", MediaType: "image/png", Data: quadrantPNG},
+		}}}
+	}
+	txt := func(s string) anthropicschema.ToolResultContentItem {
+		return anthropicschema.ToolResultContentItem{Text: &anthropicschema.TextBlockParam{Type: "text", Text: s}}
+	}
+	result := func(id string, items ...anthropicschema.ToolResultContentItem) anthropicschema.ContentBlockParam {
+		return anthropicschema.ContentBlockParam{ToolResult: &anthropicschema.ToolResultBlockParam{
+			Type: "tool_result", ToolUseID: id,
+			Content: &anthropicschema.ToolResultContent{Array: items},
+		}}
+	}
+	call := func(id, name string) anthropicschema.ContentBlockParam {
+		return anthropicschema.ContentBlockParam{ToolUse: &anthropicschema.ToolUseBlockParam{Type: "tool_use", ID: id, Name: name, Input: map[string]any{"id": id}}}
+	}
+	assistant := func(blocks ...anthropicschema.ContentBlockParam) anthropicschema.MessageParam {
+		return anthropicschema.MessageParam{Role: anthropicschema.MessageRoleAssistant, Content: anthropicschema.MessageContent{Array: blocks}}
+	}
+	user := func(blocks ...anthropicschema.ContentBlockParam) anthropicschema.MessageParam {
+		return anthropicschema.MessageParam{Role: anthropicschema.MessageRoleUser, Content: anthropicschema.MessageContent{Array: blocks}}
+	}
+
+	// Turn 1: two parallel calls to the same tool, answered in reverse order, one with an image.
+	// Turn 2: a text-only result. Turn 3: an image-only result.
+	req := &anthropicschema.MessagesRequest{
+		Model: "gemini-4-neon", MaxTokens: 100,
+		Messages: []anthropicschema.MessageParam{
+			{Role: anthropicschema.MessageRoleUser, Content: anthropicschema.MessageContent{Text: "Go"}},
+			assistant(call("t1", "screenshot"), call("t2", "screenshot")),
+			user(result("t2", txt("second"), png()), result("t1", txt("first"))),
+			assistant(call("t3", "read")),
+			user(result("t3", txt("plain"))),
+			assistant(call("t4", "screenshot")),
+			user(result("t4", png())),
+		},
+	}
+	originalFirst := req.Messages[2].Content.Array[0].ToolResult.ToolUseID
+
+	_, body, err := NewAnthropicToGCPVertexAITranslator("").RequestBody(nil, req, false)
+	require.NoError(t, err)
+	require.Equal(t, originalFirst, req.Messages[2].Content.Array[0].ToolResult.ToolUseID, "the caller's request must not be reordered")
+
+	var got struct {
+		Contents []struct {
+			Role  string `json:"role"`
+			Parts []struct {
+				FunctionResponse *struct {
+					Name     string         `json:"name"`
+					Response map[string]any `json:"response"`
+					Parts    []struct {
+						InlineData *struct {
+							MIMEType string `json:"mimeType"`
+							Data     string `json:"data"`
+						} `json:"inlineData"`
+					} `json:"parts"`
+				} `json:"functionResponse"`
+			} `json:"parts"`
+		} `json:"contents"`
+	}
+	require.NoError(t, json.Unmarshal(body, &got))
+	require.Len(t, got.Contents, 7)
+
+	// Same-name parallel calls: the responses follow call order (t1 then t2), not the order the client sent.
+	turn1 := got.Contents[2].Parts
+	require.Len(t, turn1, 2)
+	require.Equal(t, "first", turn1[0].FunctionResponse.Response["output"])
+	require.Empty(t, turn1[0].FunctionResponse.Parts, "t1 had no image")
+	require.Equal(t, "second", turn1[1].FunctionResponse.Response["output"])
+	require.Len(t, turn1[1].FunctionResponse.Parts, 1)
+
+	// A text-only turn in between leaves no image behind.
+	turn2 := got.Contents[4].Parts[0].FunctionResponse
+	require.Equal(t, "read", turn2.Name)
+	require.Equal(t, map[string]any{"output": "plain"}, turn2.Response)
+	require.Empty(t, turn2.Parts)
+
+	// Image-only result: no output key, one reference, and the bytes are the real PNG.
+	turn3 := got.Contents[6].Parts[0].FunctionResponse
+	require.Equal(t, map[string]any{"image_1": map[string]any{"$ref": "image_1"}}, turn3.Response)
+	require.Len(t, turn3.Parts, 1)
+
+	for _, p := range []*struct {
+		MIMEType string `json:"mimeType"`
+		Data     string `json:"data"`
+	}{turn1[1].FunctionResponse.Parts[0].InlineData, turn3.Parts[0].InlineData} {
+		require.Equal(t, "image/png", p.MIMEType)
+		require.Equal(t, quadrantPNG, p.Data)
+		raw, decErr := base64.StdEncoding.DecodeString(p.Data)
+		require.NoError(t, decErr)
+		img, decErr := imagepng.Decode(bytes.NewReader(raw))
+		require.NoError(t, decErr)
+		require.Equal(t, color.RGBA{255, 0, 0, 255}, color.RGBAModel.Convert(img.At(0, 0)))
+		require.Equal(t, color.RGBA{0, 255, 0, 255}, color.RGBAModel.Convert(img.At(7, 0)))
+		require.Equal(t, color.RGBA{0, 0, 255, 255}, color.RGBAModel.Convert(img.At(0, 7)))
+		require.Equal(t, color.RGBA{255, 255, 0, 255}, color.RGBAModel.Convert(img.At(7, 7)))
+	}
+}
+
+func TestWithToolResultsInCallOrder(t *testing.T) {
+	use := func(ids ...string) anthropicschema.MessageParam {
+		var blocks []anthropicschema.ContentBlockParam
+		for _, id := range ids {
+			blocks = append(blocks, anthropicschema.ContentBlockParam{ToolUse: &anthropicschema.ToolUseBlockParam{Type: "tool_use", ID: id, Name: "f"}})
+		}
+		return anthropicschema.MessageParam{Role: anthropicschema.MessageRoleAssistant, Content: anthropicschema.MessageContent{Array: blocks}}
+	}
+	results := func(ids ...string) anthropicschema.MessageParam {
+		var blocks []anthropicschema.ContentBlockParam
+		for _, id := range ids {
+			if id == "text" {
+				blocks = append(blocks, anthropicschema.ContentBlockParam{Text: &anthropicschema.TextBlockParam{Type: "text", Text: "note"}})
+				continue
+			}
+			blocks = append(blocks, anthropicschema.ContentBlockParam{ToolResult: &anthropicschema.ToolResultBlockParam{Type: "tool_result", ToolUseID: id}})
+		}
+		return anthropicschema.MessageParam{Role: anthropicschema.MessageRoleUser, Content: anthropicschema.MessageContent{Array: blocks}}
+	}
+	order := func(m anthropicschema.MessageParam) []string {
+		var ids []string
+		for _, b := range m.Content.Array {
+			if b.ToolResult != nil {
+				ids = append(ids, b.ToolResult.ToolUseID)
+			} else {
+				ids = append(ids, "text")
+			}
+		}
+		return ids
+	}
+	tests := []struct {
+		name    string
+		calls   []string
+		results []string
+		want    []string
+	}{
+		{"already in order", []string{"a", "b"}, []string{"a", "b"}, []string{"a", "b"}},
+		{"reversed", []string{"a", "b", "c"}, []string{"c", "b", "a"}, []string{"a", "b", "c"}},
+		{"text block keeps its slot", []string{"a", "b"}, []string{"b", "text", "a"}, []string{"a", "text", "b"}},
+		{"unknown id goes last, others keep order", []string{"a", "b"}, []string{"x", "b", "y", "a"}, []string{"a", "b", "x", "y"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			body := &anthropicschema.MessagesRequest{Messages: []anthropicschema.MessageParam{use(tc.calls...), results(tc.results...)}}
+			got := withToolResultsInCallOrder(body)
+			require.Equal(t, tc.want, order(got.Messages[1]))
+			require.Equal(t, tc.results, order(body.Messages[1]), "the input must not be modified")
 		})
 	}
 }

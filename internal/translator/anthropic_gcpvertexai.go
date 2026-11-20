@@ -63,6 +63,8 @@ func (a *anthropicToGCPVertexAITranslator) RequestBody(_ []byte, body *anthropic
 		return nil, nil, err
 	}
 
+	body = withToolResultsInCallOrder(body)
+
 	a.stream = body.Stream
 	a.requestModel = cmp.Or(a.modelNameOverride, body.Model)
 
@@ -286,6 +288,59 @@ func validateAnthropicToolResultForGCPVertexAI(toolResult *anthropic.ToolResultB
 		}
 	}
 	return nil
+}
+
+// withToolResultsInCallOrder returns a request whose tool_result blocks follow the order of the
+// tool_use blocks they answer. Anthropic matches results to calls by id, so clients may send
+// parallel results in any order, but Gemini pairs functionResponse parts with the preceding
+// functionCall parts by position and name, so same-name parallel calls would otherwise swap results.
+// Results whose id matches no call keep their relative order after the matched ones. The input is not modified.
+func withToolResultsInCallOrder(body *anthropic.MessagesRequest) *anthropic.MessagesRequest {
+	var out *anthropic.MessagesRequest
+	for i := 1; i < len(body.Messages); i++ {
+		msg := body.Messages[i]
+		prev := body.Messages[i-1]
+		if msg.Role != anthropic.MessageRoleUser || prev.Role != anthropic.MessageRoleAssistant {
+			continue
+		}
+		callOrder := map[string]int{}
+		for _, block := range prev.Content.Array {
+			if block.ToolUse != nil {
+				callOrder[block.ToolUse.ID] = len(callOrder)
+			}
+		}
+		var slots []int
+		for j, block := range msg.Content.Array {
+			if block.ToolResult != nil {
+				slots = append(slots, j)
+			}
+		}
+		rank := func(j int) int {
+			if r, ok := callOrder[msg.Content.Array[j].ToolResult.ToolUseID]; ok {
+				return r
+			}
+			return len(callOrder)
+		}
+		if len(slots) < 2 || slices.IsSortedFunc(slots, func(a, b int) int { return cmp.Compare(rank(a), rank(b)) }) {
+			continue
+		}
+		sorted := slices.Clone(slots)
+		slices.SortStableFunc(sorted, func(a, b int) int { return cmp.Compare(rank(a), rank(b)) })
+		content := slices.Clone(msg.Content.Array)
+		for k, slot := range slots {
+			content[slot] = msg.Content.Array[sorted[k]]
+		}
+		if out == nil {
+			clone := *body
+			clone.Messages = slices.Clone(body.Messages)
+			out = &clone
+		}
+		out.Messages[i].Content.Array = content
+	}
+	if out == nil {
+		return body
+	}
+	return out
 }
 
 // functionResponseImageMIMETypes are the image types Vertex accepts inside a functionResponse.
