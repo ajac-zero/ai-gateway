@@ -1,0 +1,285 @@
+# Fork-only: syncs this fork with upstream using jj-fork, with no LLM involved.
+# Triggered by hand (`gh workflow run fork_sync.yaml [-f force=true]`) when upstream main moves.
+#
+# Clean sync (exit 0)   -> `jj fork apply --push` publishes fork/main, series and glues.
+# Needs repair (exit 20) -> nothing is pushed; the report is uploaded and an
+#                          `Upstream sync needs repair` issue is opened (or commented on).
+# Any other failure      -> the job fails; an open repair issue gets a comment.
+#
+# Pushes use the write deploy key in FORK_SYNC_DEPLOY_KEY (not GITHUB_TOKEN) so that the push
+# of fork/main triggers the Fork Images workflow.
+name: Fork Sync
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Run the sync even when fork/main already contains upstream main"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: fork-sync
+  cancel-in-progress: false
+
+env:
+  JJ_VERSION: "0.43.0"
+  JJ_SHA256: "59e5588583ac82b623239929368c65b90735931c0f26b5a16c1f04d5bb97643d" # jj-v0.43.0-x86_64-unknown-linux-musl.tar.gz
+  JJ_FORK_VERSION: "0.2.9"
+  FORK_REPO_SSH: "git@github.com:ajac-zero/ai-gateway.git"
+  UPSTREAM_URL: "https://github.com/theagentrouter/agent-router.git"
+  ISSUE_LABEL: "upstream-sync-conflict"
+  ISSUE_TITLE: "Upstream sync needs repair"
+
+jobs:
+  sync:
+    name: sync
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Ensure git >= 2.41
+        run: |
+          need="2.41.0"
+          have="$(git --version | awk '{print $3}')"
+          if [[ "$(printf '%s\n%s\n' "$need" "$have" | sort -V | head -n1)" != "$need" ]]; then
+            echo "git $have is older than $need; installing from the git-core PPA"
+            sudo add-apt-repository -y ppa:git-core/ppa
+            sudo apt-get update
+            sudo apt-get install -y git
+          fi
+          git --version
+
+      - name: Install jj and jj-fork
+        run: |
+          set -euo pipefail
+          bin="$HOME/.local/bin"
+          mkdir -p "$bin"
+          tmp="$(mktemp -d)"
+
+          jj_asset="jj-v${JJ_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          curl -fsSL --retry 3 -o "$tmp/$jj_asset" \
+            "https://github.com/jj-vcs/jj/releases/download/v${JJ_VERSION}/${jj_asset}"
+          echo "${JJ_SHA256}  $tmp/$jj_asset" | sha256sum -c -
+          tar -xzf "$tmp/$jj_asset" -C "$tmp" ./jj
+          install -m 0755 "$tmp/jj" "$bin/jj"
+
+          fork_asset="jj-fork-v${JJ_FORK_VERSION}-x86_64-unknown-linux-gnu"
+          base="https://github.com/ajac-zero/jj-fork/releases/download/v${JJ_FORK_VERSION}"
+          curl -fsSL --retry 3 -o "$tmp/$fork_asset.tar.gz" "$base/$fork_asset.tar.gz"
+          curl -fsSL --retry 3 -o "$tmp/$fork_asset.tar.gz.sha256" "$base/$fork_asset.tar.gz.sha256"
+          # The .sha256 file may name the asset with a path of its own; check the hash against our download.
+          echo "$(awk '{print $1}' "$tmp/$fork_asset.tar.gz.sha256")  $tmp/$fork_asset.tar.gz" | sha256sum -c -
+          tar -xzf "$tmp/$fork_asset.tar.gz" -C "$tmp"
+          install -m 0755 "$tmp/$fork_asset/jj-fork" "$bin/jj-fork"
+          rm -rf "$tmp"
+
+          echo "$bin" >> "$GITHUB_PATH"
+          "$bin/jj" --version
+          "$bin/jj-fork" --version
+
+      - name: Configure identity and SSH deploy key
+        env:
+          FORK_SYNC_DEPLOY_KEY: ${{ secrets.FORK_SYNC_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$FORK_SYNC_DEPLOY_KEY" ]]; then
+            echo "::error::secret FORK_SYNC_DEPLOY_KEY is not set"
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          umask 077
+          printf '%s\n' "$FORK_SYNC_DEPLOY_KEY" > ~/.ssh/fork_sync_key
+          chmod 600 ~/.ssh/fork_sync_key
+          # Pin GitHub's host keys from the TLS-protected meta API instead of trusting on first use.
+          curl -fsSL https://api.github.com/meta | jq -r '.ssh_keys[] | "github.com " + .' > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<'EOF'
+          Host github.com
+            User git
+            IdentityFile ~/.ssh/fork_sync_key
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+            UserKnownHostsFile ~/.ssh/known_hosts
+          EOF
+          chmod 600 ~/.ssh/config
+
+          git config --global user.name "fork-sync[bot]"
+          git config --global user.email "fork-sync[bot]@users.noreply.github.com"
+          echo "JJ_USER=fork-sync[bot]" >> "$GITHUB_ENV"
+          echo "JJ_EMAIL=fork-sync[bot]@users.noreply.github.com" >> "$GITHUB_ENV"
+
+          git remote set-url origin "$FORK_REPO_SSH"
+          git remote get-url origin
+          # Fails early if the key cannot reach the repo.
+          git ls-remote --exit-code origin refs/heads/fork/main
+
+      - name: Initialize jj-fork
+        run: |
+          set -euo pipefail
+          jj-fork init
+          git remote get-url upstream || git remote add upstream "$UPSTREAM_URL"
+
+      - name: Sync with upstream
+        id: sync
+        env:
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -uo pipefail
+          out="$RUNNER_TEMP/out"        # plans and reports must stay outside the working tree
+          mkdir -p "$out"
+          plan="$out/plan.json"
+          report="$out/report.json"
+          log="$out/sync.log"
+          : > "$log"
+
+          result() { echo "result=$1" >> "$GITHUB_OUTPUT"; echo "exit_code=$2" >> "$GITHUB_OUTPUT"; }
+
+          git fetch --quiet upstream main
+          upstream_sha="$(git rev-parse FETCH_HEAD)"
+          before="$(git ls-remote origin refs/heads/fork/main | awk '{print $1}')"
+          echo "upstream_sha=$upstream_sha" >> "$GITHUB_OUTPUT"
+          echo "before=$before" >> "$GITHUB_OUTPUT"
+          echo "out=$out" >> "$GITHUB_OUTPUT"
+
+          git fetch --quiet origin fork/main
+          if [[ "$FORCE" != "true" ]] && git merge-base --is-ancestor "$upstream_sha" "$before"; then
+            echo "fork/main ($before) already contains upstream main ($upstream_sha); nothing to do." | tee -a "$log"
+            echo "after=$before" >> "$GITHUB_OUTPUT"
+            result noop 0
+            exit 0
+          fi
+
+          jj-fork sync --save-plan "$plan" --report "$report" 2>&1 | tee -a "$log"
+          code="${PIPESTATUS[0]}"
+          echo "jj fork sync exit code: $code" | tee -a "$log"
+
+          if [[ "$code" == "0" ]]; then
+            if [[ -f "$plan" ]]; then
+              jj-fork apply "$plan" --push 2>&1 | tee -a "$log"
+              code="${PIPESTATUS[0]}"
+              echo "jj fork apply exit code: $code" | tee -a "$log"
+            else
+              echo "sync saved no plan: nothing to do." | tee -a "$log"
+            fi
+          fi
+
+          after="$(git ls-remote origin refs/heads/fork/main | awk '{print $1}')"
+          echo "after=$after" >> "$GITHUB_OUTPUT"
+          case "$code" in
+            0)
+              if [[ "$after" == "$before" ]]; then result noop 0; else result pushed 0; fi ;;
+            20) result conflict 20 ;;
+            *) result error "$code" ;;
+          esac
+          exit 0
+
+      - name: Upload report
+        if: always() && steps.sync.outputs.out != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: fork-sync-report
+          path: |
+            ${{ steps.sync.outputs.out }}/report.json
+            ${{ steps.sync.outputs.out }}/sync.log
+          if-no-files-found: ignore
+
+      - name: Step summary
+        if: always()
+        env:
+          RESULT: ${{ steps.sync.outputs.result }}
+          CODE: ${{ steps.sync.outputs.exit_code }}
+          UPSTREAM_SHA: ${{ steps.sync.outputs.upstream_sha }}
+          BEFORE: ${{ steps.sync.outputs.before }}
+          AFTER: ${{ steps.sync.outputs.after }}
+        run: |
+          {
+            echo "## Fork sync"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Outcome | \`${RESULT:-did not complete}\` |"
+            echo "| Exit code | \`${CODE:-n/a}\` |"
+            echo "| Upstream main | \`${UPSTREAM_SHA:-n/a}\` |"
+            echo "| fork/main before | \`${BEFORE:-n/a}\` |"
+            echo "| fork/main after | \`${AFTER:-n/a}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report to the repair issue
+        if: always() && steps.sync.outputs.result != '' && steps.sync.outputs.result != 'noop'
+        env:
+          RESULT: ${{ steps.sync.outputs.result }}
+          CODE: ${{ steps.sync.outputs.exit_code }}
+          UPSTREAM_SHA: ${{ steps.sync.outputs.upstream_sha }}
+          OUT: ${{ steps.sync.outputs.out }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [[ "$RESULT" == "pushed" ]]; then
+            exit 0   # handled by the next step
+          fi
+          issues="$(jq -r '[.. | objects | select(has("id") and (.id|type=="string") and (.id|test("^(series|glue|fork)-"))) | "- `" + .id + "`"] | unique | .[]' "$OUT/report.json" 2>/dev/null || true)"
+          body="$(
+            echo "Run: $RUN_URL"
+            echo "Upstream main: \`$UPSTREAM_SHA\`"
+            echo "Exit code: \`$CODE\` ($RESULT)"
+            echo
+            if [[ -n "$issues" ]]; then
+              echo "Issues from the report:"
+              echo "$issues"
+              echo
+            fi
+            echo "Last lines of the sync log (the full report is in the run's \`fork-sync-report\` artifact):"
+            echo '```'
+            tail -n 40 "$OUT/sync.log" | cut -c1-300
+            echo '```'
+          )"
+          num="$(gh issue list --label "$ISSUE_LABEL" --state open --json number --jq '.[0].number // empty')"
+          if [[ -n "$num" ]]; then
+            gh issue comment "$num" --body "$body"
+          elif [[ "$RESULT" == "conflict" ]]; then
+            gh label create "$ISSUE_LABEL" --color B60205 --description "Upstream sync needs a person or agent" 2>/dev/null || true
+            gh issue create --title "$ISSUE_TITLE" --label "$ISSUE_LABEL" --body "$body"
+          fi
+
+      - name: Close repair issues after a clean sync
+        if: steps.sync.outputs.result == 'pushed' || steps.sync.outputs.result == 'noop'
+        env:
+          UPSTREAM_SHA: ${{ steps.sync.outputs.upstream_sha }}
+          AFTER: ${{ steps.sync.outputs.after }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          for num in $(gh issue list --label "$ISSUE_LABEL" --state open --json number --jq '.[].number'); do
+            gh issue close "$num" --comment "Resolved by a clean sync: $RUN_URL (upstream main \`$UPSTREAM_SHA\`, fork/main \`$AFTER\`)."
+          done
+
+      - name: Fail unless the sync succeeded
+        if: always()
+        env:
+          RESULT: ${{ steps.sync.outputs.result }}
+          CODE: ${{ steps.sync.outputs.exit_code }}
+        run: |
+          case "$RESULT" in
+            pushed|noop) exit 0 ;;
+            conflict) echo "::error::Upstream sync needs repair (exit $CODE); nothing was pushed."; exit 1 ;;
+            *) echo "::error::Upstream sync failed (${RESULT:-did not complete}, exit ${CODE:-n/a})."; exit 1 ;;
+          esac
