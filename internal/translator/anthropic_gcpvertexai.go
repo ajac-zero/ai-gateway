@@ -8,6 +8,7 @@ package translator
 import (
 	"bytes"
 	"cmp"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log/slog"
@@ -232,9 +233,19 @@ func validateAnthropicContentBlockForGCPVertexAI(role anthropic.MessageRole, blo
 		if role != anthropic.MessageRoleAssistant {
 			return fmt.Errorf("%w: thinking content is only supported in assistant messages", internalapi.ErrInvalidRequestBody)
 		}
+		// Gemini signatures are base64 (the gateway returns them that way); reject anything else here
+		// so the client gets a 400 instead of Vertex rejecting a corrupted signature.
+		if _, err := base64.StdEncoding.DecodeString(block.Thinking.Signature); err != nil {
+			return fmt.Errorf("%w: thinking signature must be base64: %w", internalapi.ErrInvalidRequestBody, err)
+		}
 		return nil
 	case block.RedactedThinking != nil:
-		return fmt.Errorf("%w: redacted_thinking content blocks are not supported for GCP Vertex AI translation", internalapi.ErrInvalidRequestBody)
+		// Gemini never produces redacted thinking, so these come from another provider earlier in the
+		// conversation. They carry nothing Gemini can use and are dropped by the translation.
+		if role != anthropic.MessageRoleAssistant {
+			return fmt.Errorf("%w: redacted_thinking content is only supported in assistant messages", internalapi.ErrInvalidRequestBody)
+		}
+		return nil
 	case block.ServerToolUse != nil:
 		return fmt.Errorf("%w: server_tool_use content is not supported for GCP Vertex AI translation", internalapi.ErrInvalidRequestBody)
 	case block.WebSearchToolResult != nil:
@@ -292,13 +303,29 @@ func anthropicEffortToThinkingLevel(effort anthropic.OutputConfigEffort, model i
 	return ""
 }
 
+// anthropicBudgetToThinkingLevel buckets an Anthropic thinking budget into a Gemini thinking level
+// for models that reject thinkingBudget (Gemini 3 and later). The cut-offs follow Google's own
+// effort-to-budget table for the OpenAI-compatible API (low=1024, medium=8192, high=24576 tokens),
+// read in reverse: up to 1024 tokens is LOW, up to 8192 is MEDIUM, and anything above is HIGH.
+func anthropicBudgetToThinkingLevel(budgetTokens float64, model internalapi.RequestModel) genai.ThinkingLevel {
+	switch {
+	case budgetTokens <= 1024:
+		return anthropicEffortToThinkingLevel(anthropic.OutputConfigEffortLow, model)
+	case budgetTokens <= 8192:
+		return anthropicEffortToThinkingLevel(anthropic.OutputConfigEffortMedium, model)
+	default:
+		return anthropicEffortToThinkingLevel(anthropic.OutputConfigEffortHigh, model)
+	}
+}
+
 // anthropicThinkingToGemini builds the Gemini thinkingConfig from the Anthropic thinking
 // and output_config.effort fields. It returns nil when neither applies.
 //
 //   - disabled: thoughts off; effort is ignored.
-//   - enabled: thoughts on. On Gemini 3+ an effort sets thinkingLevel and takes precedence over
-//     budget_tokens, because Vertex rejects thinkingLevel together with thinkingBudget; without
-//     effort, budget_tokens maps to thinkingBudget.
+//   - enabled: thoughts on. Gemini 3+ rejects thinkingBudget ("Use thinking level instead"), so
+//     there an effort sets thinkingLevel and takes precedence over budget_tokens, and without an
+//     effort budget_tokens is bucketed into a level (see anthropicBudgetToThinkingLevel). Earlier
+//     models map budget_tokens to thinkingBudget.
 //   - adaptive: thoughts on, with the level derived from effort (model default without effort).
 //   - absent: effort alone sets the level without requesting thought summaries.
 //
@@ -318,7 +345,10 @@ func anthropicThinkingToGemini(body *anthropic.MessagesRequest, model internalap
 	case thinking.Disabled != nil:
 		return &genai.ThinkingConfig{IncludeThoughts: false}
 	case thinking.Enabled != nil:
-		if level != "" {
+		if supportsThinkingLevel(model) {
+			if level == "" {
+				level = anthropicBudgetToThinkingLevel(thinking.Enabled.BudgetTokens, model)
+			}
 			return &genai.ThinkingConfig{IncludeThoughts: true, ThinkingLevel: level}
 		}
 		budget := int32(thinking.Enabled.BudgetTokens) //nolint:gosec // validated before conversion.

@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"path"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -369,6 +370,8 @@ func assistantMsgToGeminiParts(msg *openai.ChatCompletionAssistantMessageParam) 
 				if contPart.Text != nil && *contPart.Text != "" {
 					parts = append(parts, genai.NewPartFromText(*contPart.Text))
 				}
+			case openai.ChatCompletionAssistantMessageParamContentTypeRedactedThinking:
+				// Gemini has no redacted thinking; it can only come from another provider, so drop it.
 			case openai.ChatCompletionAssistantMessageParamContentTypeThinking:
 				if contPart.Text != nil && *contPart.Text != "" {
 					thoughtPart := genai.NewPartFromText(*contPart.Text)
@@ -395,6 +398,18 @@ func assistantMsgToGeminiParts(msg *openai.ChatCompletionAssistantMessageParam) 
 		// No content provided, this is valid.
 	default:
 		return nil, nil, fmt.Errorf("%w: message 'content' must be a string or an array", internalapi.ErrInvalidRequestBody)
+	}
+
+	// Gemini can return the signature on a text answer with an empty thought summary, so the thinking
+	// block has no text to carry it. Google documents the signature on the final text part in that
+	// case. Do not invent a part when there is no text.
+	if len(msg.ToolCalls) == 0 && thoughtSignature != nil && !slices.ContainsFunc(parts, func(p *genai.Part) bool { return p.ThoughtSignature != nil }) {
+		for i := len(parts) - 1; i >= 0; i-- {
+			if parts[i].Text != "" && !parts[i].Thought {
+				parts[i].ThoughtSignature = thoughtSignature
+				break
+			}
+		}
 	}
 
 	return parts, knownToolCalls, nil
@@ -947,9 +962,16 @@ func geminiFinishReasonToOpenAI[T toolCallSlice](reason genai.FinishReason, tool
 func extractTextAndThoughtSummaryFromGeminiParts(parts []*genai.Part, responseMode geminiResponseMode) (string, string, string) {
 	var textBuilder strings.Builder
 	var thoughtBuilder strings.Builder
-	var signatureBuilder strings.Builder
+	var signature string
 
 	for _, part := range parts {
+		// A thought signature can sit on a thought part, a text part, or a part with empty text
+		// (signature-only). Keep only the first one: Gemini sends at most one per response and
+		// concatenating base64 values would corrupt it. Signatures on functionCall parts are
+		// collected by the tool call extraction instead.
+		if part != nil && part.FunctionCall == nil && signature == "" && len(part.ThoughtSignature) > 0 {
+			signature = base64.StdEncoding.EncodeToString(part.ThoughtSignature)
+		}
 		if part != nil && part.Text != "" {
 			if part.Thought {
 				thoughtBuilder.WriteString(part.Text)
@@ -969,15 +991,11 @@ func extractTextAndThoughtSummaryFromGeminiParts(parts []*genai.Part, responseMo
 					// output matches the requested choices verbatim.
 					part.Text = strings.TrimSpace(part.Text)
 				}
-				// ThoughtSignature is only appended with Thought as False
-				if part.ThoughtSignature != nil {
-					signatureBuilder.WriteString(base64.StdEncoding.EncodeToString(part.ThoughtSignature))
-				}
 				textBuilder.WriteString(part.Text)
 			}
 		}
 	}
-	return thoughtBuilder.String(), textBuilder.String(), signatureBuilder.String()
+	return thoughtBuilder.String(), textBuilder.String(), signature
 }
 
 // extractToolCallsFromGeminiParts extracts tool calls and thought signature from Gemini parts.

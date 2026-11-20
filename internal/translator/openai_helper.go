@@ -749,6 +749,7 @@ type openAIStreamToAnthropicState struct {
 	messageStarted   bool // flag indicating emitted message_start
 	hasOpenBlock     bool // flag indicating emitted content_block_start but not content_block_stop
 	hasThinkingBlock bool // flag indicating the open block is a thinking block
+	hasSignature     bool // flag indicating the open thinking block already received its signature_delta
 	closingEmitted   bool // flag indicating emitted content_block_stop + message_delta + message_stop
 	messageID        string
 	model            string
@@ -885,11 +886,17 @@ func (s *openAIStreamToAnthropicState) handleChunk(chunk *openai.ChatCompletionR
 				return err
 			}
 		}
-		// Signatures ride on thinking_blocks (reasoning_content is a plain string).
+		// Signatures ride on thinking_blocks (reasoning_content is a plain string). Some backends
+		// repeat the reasoning_content text in the block, which must not be emitted twice.
+		reasoningEmitted := delta.ReasoningContent != nil && delta.ReasoningContent.Text != ""
 		for i := range delta.ThinkingBlocks {
 			tb := &delta.ThinkingBlocks[i]
+			text := tb.Thinking
+			if reasoningEmitted {
+				text = ""
+			}
 			if err := s.handleReasoningDelta(&openai.StreamReasoningContent{
-				Text: tb.Thinking, Signature: tb.Signature,
+				Text: text, Signature: tb.Signature,
 			}, out); err != nil {
 				return err
 			}
@@ -1004,6 +1011,12 @@ func (s *openAIStreamToAnthropicState) handleReasoningDelta(rc *openai.StreamRea
 	if rc.Text == "" && rc.Signature == "" {
 		return nil
 	}
+	// A signature ends a thinking block: later thinking text or another signature starts a new one.
+	if s.hasThinkingBlock && s.hasSignature {
+		if err := s.closeThinkingBlock(out); err != nil {
+			return err
+		}
+	}
 	// Close any open non-thinking block (e.g., text) before starting a thinking block.
 	// This handles the unlikely case where reasoning arrives after text content.
 	if !s.hasThinkingBlock && s.hasOpenBlock {
@@ -1038,6 +1051,7 @@ func (s *openAIStreamToAnthropicState) handleReasoningDelta(rc *openai.StreamRea
 func (s *openAIStreamToAnthropicState) emitThinkingBlockStart(out *[]byte) error {
 	s.hasOpenBlock = true
 	s.hasThinkingBlock = true
+	s.hasSignature = false
 	payload := sseContentBlockStartThinking{
 		Type:         "content_block_start",
 		Index:        s.blockIndex,
@@ -1068,6 +1082,7 @@ func (s *openAIStreamToAnthropicState) emitThinkingDelta(text string, out *[]byt
 
 // emitSignatureDelta emits a content_block_delta SSE event with a signature.
 func (s *openAIStreamToAnthropicState) emitSignatureDelta(signature string, out *[]byte) error {
+	s.hasSignature = true
 	payload := sseContentBlockDeltaSignature{
 		Type:  "content_block_delta",
 		Index: s.blockIndex,

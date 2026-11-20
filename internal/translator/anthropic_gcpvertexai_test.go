@@ -130,7 +130,10 @@ func TestAnthropicToGCPVertexAI_RequestBodyRejectsUnsupportedContent(t *testing.
 func TestAnthropicToGCPVertexAI_RequestBodyThinkingConfig(t *testing.T) {
 	adaptive := &anthropicschema.Thinking{Adaptive: &anthropicschema.ThinkingAdaptive{Type: "adaptive"}}
 	disabled := &anthropicschema.Thinking{Disabled: &anthropicschema.ThinkingDisabled{Type: "disabled"}}
-	enabled := &anthropicschema.Thinking{Enabled: &anthropicschema.ThinkingEnabled{Type: "enabled", BudgetTokens: 2048}}
+	enabledWith := func(budget float64) *anthropicschema.Thinking {
+		return &anthropicschema.Thinking{Enabled: &anthropicschema.ThinkingEnabled{Type: "enabled", BudgetTokens: budget}}
+	}
+	enabled := enabledWith(2048)
 	effort := func(e anthropicschema.OutputConfigEffort) *anthropicschema.OutputConfig {
 		return &anthropicschema.OutputConfig{Effort: e}
 	}
@@ -155,7 +158,14 @@ func TestAnthropicToGCPVertexAI_RequestBodyThinkingConfig(t *testing.T) {
 		{name: "adaptive with effort", model: "gemini-4-neon", thinking: adaptive, output: effort("low"), want: `{"includeThoughts":true,"thinkingLevel":"LOW"}`},
 		{name: "adaptive with max", model: "gemini-4-neon", thinking: adaptive, output: effort("max"), want: `{"includeThoughts":true,"thinkingLevel":"HIGH"}`},
 		{name: "adaptive without effort", model: "gemini-4-neon", thinking: adaptive, want: `{"includeThoughts":true}`},
-		{name: "enabled with budget only", model: "gemini-4-neon", thinking: enabled, want: `{"includeThoughts":true,"thinkingBudget":2048}`},
+		// Gemini 3+ rejects thinkingBudget, so budget_tokens is bucketed: <=1024 LOW, <=8192 MEDIUM, else HIGH.
+		{name: "budget 1024 -> LOW", model: "gemini-4-neon", thinking: enabledWith(1024), want: `{"includeThoughts":true,"thinkingLevel":"LOW"}`},
+		{name: "budget 1025 -> MEDIUM", model: "gemini-4-neon", thinking: enabledWith(1025), want: `{"includeThoughts":true,"thinkingLevel":"MEDIUM"}`},
+		{name: "budget 8192 -> MEDIUM", model: "gemini-4-neon", thinking: enabledWith(8192), want: `{"includeThoughts":true,"thinkingLevel":"MEDIUM"}`},
+		{name: "budget 8193 -> HIGH", model: "gemini-4-neon", thinking: enabledWith(8193), want: `{"includeThoughts":true,"thinkingLevel":"HIGH"}`},
+		{name: "budget 32000 -> HIGH", model: "gemini-3.1-pro-preview", thinking: enabledWith(32000), want: `{"includeThoughts":true,"thinkingLevel":"HIGH"}`},
+		{name: "budget medium on gemini 3 pro has no MEDIUM", model: "gemini-3-pro-preview", thinking: enabledWith(4096), want: `{"includeThoughts":true,"thinkingLevel":"HIGH"}`},
+		{name: "enabled with budget on gemini 2.5 keeps thinkingBudget", model: "gemini-2.5-flash", thinking: enabled, want: `{"includeThoughts":true,"thinkingBudget":2048}`},
 		{name: "enabled with budget and effort prefers level", model: "gemini-4-neon", thinking: enabled, output: effort("medium"), want: `{"includeThoughts":true,"thinkingLevel":"MEDIUM"}`},
 		{name: "enabled with budget and effort on gemini 2.5 keeps budget", model: "gemini-2.5-flash", thinking: enabled, output: effort("high"), want: `{"includeThoughts":true,"thinkingBudget":2048}`},
 		{name: "disabled", model: "gemini-4-neon", thinking: disabled, want: `{}`},
@@ -664,3 +674,376 @@ func (s *recordingAnthropicMessageSpan) RecordResponseChunk(chunk *anthropicsche
 func (s *recordingAnthropicMessageSpan) RecordResponse(*anthropicschema.MessagesResponse) {}
 func (s *recordingAnthropicMessageSpan) EndSpanOnError(int, []byte)                       {}
 func (s *recordingAnthropicMessageSpan) EndSpan()                                         {}
+
+// sseBlock is one Anthropic content block rebuilt from stream events.
+type sseBlock struct {
+	Type      string
+	Thinking  string
+	Signature string
+	Text      string
+	ToolName  string
+	ToolInput string
+}
+
+// assembleSSEBlocks rebuilds content blocks from Anthropic SSE events and checks that the block
+// indexes are consecutive, each block is opened before its deltas and closed before the next opens.
+func assembleSSEBlocks(t *testing.T, sse []byte) []sseBlock {
+	t.Helper()
+	var blocks []sseBlock
+	open := -1
+	for line := range strings.SplitSeq(string(sse), "\n") {
+		data, ok := strings.CutPrefix(line, "data: ")
+		if !ok {
+			continue
+		}
+		var ev struct {
+			Type         string `json:"type"`
+			Index        int    `json:"index"`
+			ContentBlock struct {
+				Type string `json:"type"`
+				Name string `json:"name"`
+			} `json:"content_block"`
+			Delta struct {
+				Type        string `json:"type"`
+				Thinking    string `json:"thinking"`
+				Signature   string `json:"signature"`
+				Text        string `json:"text"`
+				PartialJSON string `json:"partial_json"`
+			} `json:"delta"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(data), &ev))
+		switch ev.Type {
+		case "content_block_start":
+			require.Equal(t, -1, open, "block %d started while block %d is open", ev.Index, open)
+			require.Equal(t, len(blocks), ev.Index, "block indexes must be consecutive")
+			blocks = append(blocks, sseBlock{Type: ev.ContentBlock.Type, ToolName: ev.ContentBlock.Name})
+			open = ev.Index
+		case "content_block_delta":
+			require.Equal(t, open, ev.Index, "delta for a block that is not open")
+			b := &blocks[open]
+			switch ev.Delta.Type {
+			case "thinking_delta":
+				require.Equal(t, "thinking", b.Type)
+				require.Empty(t, b.Signature, "thinking_delta after signature_delta")
+				b.Thinking += ev.Delta.Thinking
+			case "signature_delta":
+				require.Equal(t, "thinking", b.Type)
+				require.Empty(t, b.Signature, "a thinking block has one signature_delta")
+				b.Signature = ev.Delta.Signature
+			case "text_delta":
+				b.Text += ev.Delta.Text
+			case "input_json_delta":
+				b.ToolInput += ev.Delta.PartialJSON
+			}
+		case "content_block_stop":
+			require.Equal(t, open, ev.Index)
+			open = -1
+		}
+	}
+	require.Equal(t, -1, open, "a block is left open")
+	return blocks
+}
+
+func TestAnthropicToGCPVertexAI_ThoughtSignatures(t *testing.T) {
+	// "c2ln" and "c2lnLTI=" are base64 for "sig" and "sig-2".
+	call := func(name, args, sig string) string {
+		s := fmt.Sprintf(`{"functionCall":{"name":%q,"args":%s}`, name, args)
+		if sig != "" {
+			s += fmt.Sprintf(`,"thoughtSignature":%q`, sig)
+		}
+		return s + "}"
+	}
+	thought := func(text string) string { return fmt.Sprintf(`{"text":%q,"thought":true}`, text) }
+	text := func(text, sig string) string {
+		s := fmt.Sprintf(`{"text":%q`, text)
+		if sig != "" {
+			s += fmt.Sprintf(`,"thoughtSignature":%q`, sig)
+		}
+		return s + "}"
+	}
+
+	tests := []struct {
+		name   string
+		chunks [][]string // parts of each streamed chunk
+		want   []sseBlock
+		stop   string
+		// multiSig marks responses with several signatures, which the non-streaming response
+		// collapses to one.
+		multiSig bool
+	}{
+		{
+			name:   "signature on functionCall without thought text",
+			chunks: [][]string{{call("get_weather", `{"city":"Paris"}`, "c2ln")}},
+			want: []sseBlock{
+				{Type: "thinking", Signature: "c2ln"},
+				{Type: "tool_use", ToolName: "get_weather", ToolInput: `{"city":"Paris"}`},
+			},
+			stop: "tool_use",
+		},
+		{
+			name: "thought summary, then signature on a later functionCall chunk",
+			chunks: [][]string{
+				{thought("Let me ")},
+				{thought("check.")},
+				{call("get_weather", `{"city":"Paris"}`, "c2ln")},
+			},
+			want: []sseBlock{
+				{Type: "thinking", Thinking: "Let me check.", Signature: "c2ln"},
+				{Type: "tool_use", ToolName: "get_weather", ToolInput: `{"city":"Paris"}`},
+			},
+			stop: "tool_use",
+		},
+		{
+			name:   "thought summary and signed functionCall in one chunk do not duplicate the summary",
+			chunks: [][]string{{thought("Let me check."), call("a", `{}`, "c2ln")}},
+			want: []sseBlock{
+				{Type: "thinking", Thinking: "Let me check.", Signature: "c2ln"},
+				{Type: "tool_use", ToolName: "a", ToolInput: `{}`},
+			},
+			stop: "tool_use",
+		},
+		{
+			name:   "parallel calls carry the signature on the first only",
+			chunks: [][]string{{call("a", `{}`, "c2ln"), call("b", `{"x":1}`, "")}},
+			want: []sseBlock{
+				{Type: "thinking", Signature: "c2ln"},
+				{Type: "tool_use", ToolName: "a", ToolInput: `{}`},
+				{Type: "tool_use", ToolName: "b", ToolInput: `{"x":1}`},
+			},
+			stop: "tool_use",
+		},
+		{
+			name:   "parallel calls in separate chunks",
+			chunks: [][]string{{call("a", `{}`, "c2ln")}, {call("b", `{}`, "")}},
+			want: []sseBlock{
+				{Type: "thinking", Signature: "c2ln"},
+				{Type: "tool_use", ToolName: "a", ToolInput: `{}`},
+				{Type: "tool_use", ToolName: "b", ToolInput: `{}`},
+			},
+			stop: "tool_use",
+		},
+		{
+			name:   "signature on the same chunk as text comes before the text",
+			chunks: [][]string{{text("Hello", "c2ln")}},
+			want:   []sseBlock{{Type: "thinking", Signature: "c2ln"}, {Type: "text", Text: "Hello"}},
+			stop:   "end_turn",
+		},
+		{
+			name:   "signature-only part with empty text after the text",
+			chunks: [][]string{{text("Hello", "")}, {text("", "c2ln")}},
+			want:   []sseBlock{{Type: "text", Text: "Hello"}, {Type: "thinking", Signature: "c2ln"}},
+			stop:   "end_turn",
+		},
+		{
+			name:   "summary and signature on the thought part",
+			chunks: [][]string{{`{"text":"Reasoning","thought":true,"thoughtSignature":"c2ln"}`}, {text("Answer", "")}},
+			want:   []sseBlock{{Type: "thinking", Thinking: "Reasoning", Signature: "c2ln"}, {Type: "text", Text: "Answer"}},
+			stop:   "end_turn",
+		},
+		{
+			name:   "a second signature opens a second thinking block",
+			chunks: [][]string{{text("", "c2ln")}, {call("a", `{}`, "c2lnLTI=")}},
+			want: []sseBlock{
+				{Type: "thinking", Signature: "c2ln"},
+				{Type: "thinking", Signature: "c2lnLTI="},
+				{Type: "tool_use", ToolName: "a", ToolInput: `{}`},
+			},
+			stop:     "tool_use",
+			multiSig: true,
+		},
+		{
+			name:   "no signature and no summary means no thinking block",
+			chunks: [][]string{{text("Hello", "")}, {text(" world", "")}},
+			want:   []sseBlock{{Type: "text", Text: "Hello world"}},
+			stop:   "end_turn",
+		},
+		{
+			name:   "no signature on a functionCall means no thinking block",
+			chunks: [][]string{{call("a", `{}`, "")}},
+			want:   []sseBlock{{Type: "tool_use", ToolName: "a", ToolInput: `{}`}},
+			stop:   "tool_use",
+		},
+		{
+			name:   "summary without signature still streams as thinking",
+			chunks: [][]string{{thought("Hmm")}, {text("Answer", "")}},
+			want:   []sseBlock{{Type: "thinking", Thinking: "Hmm"}, {Type: "text", Text: "Answer"}},
+			stop:   "end_turn",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := &anthropicschema.MessagesRequest{
+				Model: "gemini-4-neon", MaxTokens: 100, Stream: true,
+				Messages: []anthropicschema.MessageParam{{Role: anthropicschema.MessageRoleUser, Content: anthropicschema.MessageContent{Text: "Hi"}}},
+			}
+			var sse strings.Builder
+			for i, parts := range tc.chunks {
+				finish := ""
+				if i == len(tc.chunks)-1 {
+					finish = `,"finishReason":"STOP"`
+				}
+				fmt.Fprintf(&sse, "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[%s]}%s}]}\n\n", strings.Join(parts, ","), finish)
+			}
+			sse.WriteString(`data: {"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":3}}` + "\n\n")
+
+			// Feed the stream one chunk at a time, like Envoy, and also check the streamed result
+			// against the non-streaming translation of the same parts.
+			tr := NewAnthropicToGCPVertexAITranslator("")
+			_, _, err := tr.RequestBody(nil, req, false)
+			require.NoError(t, err)
+			var out []byte
+			events := strings.SplitAfter(sse.String(), "\n\n")
+			for i, ev := range events {
+				if ev == "" {
+					continue
+				}
+				_, b, _, _, rerr := tr.ResponseBody(nil, strings.NewReader(ev), i == len(events)-1, nil)
+				require.NoError(t, rerr)
+				out = append(out, b...)
+			}
+			got := assembleSSEBlocks(t, out)
+			// Tool IDs are random, so only compare names and inputs.
+			require.Equal(t, tc.want, got)
+			require.Contains(t, string(out), `"stop_reason":"`+tc.stop+`"`)
+			require.Equal(t, 1, strings.Count(string(out), "event: message_start"))
+			require.Equal(t, 1, strings.Count(string(out), "event: message_stop"))
+
+			// Non-streaming equivalence: one response made of all the chunks' parts.
+			var all []string
+			for _, parts := range tc.chunks {
+				all = append(all, parts...)
+			}
+			nreq := *req
+			nreq.Stream = false
+			ntr := NewAnthropicToGCPVertexAITranslator("")
+			_, _, err = ntr.RequestBody(nil, &nreq, false)
+			require.NoError(t, err)
+			resp := fmt.Sprintf(`{"candidates":[{"content":{"role":"model","parts":[%s]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":3}}`, strings.Join(all, ","))
+			_, nb, _, _, err := ntr.ResponseBody(nil, strings.NewReader(resp), true, nil)
+			require.NoError(t, err)
+			var nr anthropicschema.MessagesResponse
+			require.NoError(t, json.Unmarshal(nb, &nr))
+			var sigs, nsigs []string
+			for _, b := range got {
+				if b.Type == "thinking" && b.Signature != "" {
+					sigs = append(sigs, b.Signature)
+				}
+			}
+			for _, b := range nr.Content {
+				if b.Thinking != nil && b.Thinking.Signature != "" {
+					nsigs = append(nsigs, b.Thinking.Signature)
+				}
+			}
+			// The non-streaming response keeps a single signature; the stream must carry it first.
+			if tc.multiSig {
+				return
+			}
+			if len(nsigs) > 0 {
+				require.Equal(t, nsigs[0], sigs[0])
+			} else {
+				require.Empty(t, sigs)
+			}
+		})
+	}
+}
+
+func TestAnthropicToGCPVertexAI_RequestBodyThoughtSignatureHistory(t *testing.T) {
+	thinking := func(text, sig string) anthropicschema.ContentBlockParam {
+		return anthropicschema.ContentBlockParam{Thinking: &anthropicschema.ThinkingBlockParam{Type: "thinking", Thinking: text, Signature: sig}}
+	}
+	toolUse := func(id, name string) anthropicschema.ContentBlockParam {
+		return anthropicschema.ContentBlockParam{ToolUse: &anthropicschema.ToolUseBlockParam{Type: "tool_use", ID: id, Name: name, Input: map[string]any{}}}
+	}
+	text := func(s string) anthropicschema.ContentBlockParam {
+		return anthropicschema.ContentBlockParam{Text: &anthropicschema.TextBlockParam{Type: "text", Text: s}}
+	}
+	toolResult := func(id string) anthropicschema.ContentBlockParam {
+		return anthropicschema.ContentBlockParam{ToolResult: &anthropicschema.ToolResultBlockParam{Type: "tool_result", ToolUseID: id, Content: &anthropicschema.ToolResultContent{Text: "ok"}}}
+	}
+
+	tests := []struct {
+		name      string
+		assistant []anthropicschema.ContentBlockParam
+		followUp  *anthropicschema.ContentBlockParam // user turn after the assistant turn
+		want      string                             // expected model-turn parts
+		wantErr   string
+	}{
+		{
+			name:      "signature-only thinking before a tool call lands on the functionCall",
+			assistant: []anthropicschema.ContentBlockParam{thinking("", "c2ln"), toolUse("t1", "a")},
+			want:      `[{"functionCall":{"name":"a"},"thoughtSignature":"c2ln"}]`,
+		},
+		{
+			name:      "parallel calls: signature on the first functionCall only",
+			assistant: []anthropicschema.ContentBlockParam{thinking("", "c2ln"), toolUse("t1", "a"), toolUse("t2", "b")},
+			want:      `[{"functionCall":{"name":"a"},"thoughtSignature":"c2ln"},{"functionCall":{"name":"b"}}]`,
+		},
+		{
+			name:      "tool call without any signature uses Google's documented dummy signature",
+			assistant: []anthropicschema.ContentBlockParam{toolUse("t1", "a")},
+			want:      `[{"functionCall":{"name":"a"},"thoughtSignature":"c2tpcF90aG91Z2h0X3NpZ25hdHVyZV92YWxpZGF0b3I="}]`,
+		},
+		{
+			name:      "signature-only thinking before a text answer lands on the text part",
+			assistant: []anthropicschema.ContentBlockParam{thinking("", "c2ln"), text("Hello")},
+			want:      `[{"text":"Hello","thoughtSignature":"c2ln"}]`,
+		},
+		{
+			name:      "signature goes on the last text part",
+			assistant: []anthropicschema.ContentBlockParam{text("one"), thinking("", "c2ln"), text("two")},
+			want:      `[{"text":"one"},{"text":"two","thoughtSignature":"c2ln"}]`,
+		},
+		{
+			name:      "no thinking blocks leaves a text answer unchanged",
+			assistant: []anthropicschema.ContentBlockParam{text("Hello")},
+			want:      `[{"text":"Hello"}]`,
+		},
+		{
+			name:      "redacted thinking from another provider is dropped",
+			assistant: []anthropicschema.ContentBlockParam{{RedactedThinking: &anthropicschema.RedactedThinkingBlockParam{Type: "redacted_thinking", Data: "opaque"}}, text("Hello")},
+			want:      `[{"text":"Hello"}]`,
+		},
+		{
+			name:      "signature that is not base64 is a 400",
+			assistant: []anthropicschema.ContentBlockParam{thinking("x", "not base64!"), text("Hello")},
+			wantErr:   "thinking signature must be base64",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			msgs := []anthropicschema.MessageParam{
+				{Role: anthropicschema.MessageRoleUser, Content: anthropicschema.MessageContent{Text: "Hi"}},
+				{Role: anthropicschema.MessageRoleAssistant, Content: anthropicschema.MessageContent{Array: tc.assistant}},
+			}
+			var results []anthropicschema.ContentBlockParam
+			for _, b := range tc.assistant {
+				if b.ToolUse != nil {
+					results = append(results, toolResult(b.ToolUse.ID))
+				}
+			}
+			if len(results) > 0 {
+				msgs = append(msgs, anthropicschema.MessageParam{Role: anthropicschema.MessageRoleUser, Content: anthropicschema.MessageContent{Array: results}})
+			} else {
+				msgs = append(msgs, anthropicschema.MessageParam{Role: anthropicschema.MessageRoleUser, Content: anthropicschema.MessageContent{Text: "Next"}})
+			}
+			req := &anthropicschema.MessagesRequest{Model: "gemini-4-neon", MaxTokens: 100, Messages: msgs}
+			_, body, err := NewAnthropicToGCPVertexAITranslator("").RequestBody(nil, req, false)
+			if tc.wantErr != "" {
+				require.ErrorIs(t, err, internalapi.ErrInvalidRequestBody)
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			var got struct {
+				Contents []struct {
+					Role  string          `json:"role"`
+					Parts json.RawMessage `json:"parts"`
+				} `json:"contents"`
+			}
+			require.NoError(t, json.Unmarshal(body, &got))
+			require.Equal(t, "model", got.Contents[1].Role)
+			require.JSONEq(t, tc.want, string(got.Contents[1].Parts))
+		})
+	}
+}
