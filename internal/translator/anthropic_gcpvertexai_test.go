@@ -1047,3 +1047,143 @@ func TestAnthropicToGCPVertexAI_RequestBodyThoughtSignatureHistory(t *testing.T)
 		})
 	}
 }
+
+func TestAnthropicToGCPVertexAI_RequestBodyToolResultImages(t *testing.T) {
+	// "aW1hZ2U=" is base64 for "image".
+	b64 := func(mediaType string) anthropicschema.ToolResultContentItem {
+		return anthropicschema.ToolResultContentItem{Image: &anthropicschema.ImageBlockParam{Type: "image", Source: anthropicschema.ImageSource{
+			Base64: &anthropicschema.Base64ImageSource{Type: "base64", MediaType: mediaType, Data: "aW1hZ2U="},
+		}}}
+	}
+	imgURL := func(u string) anthropicschema.ToolResultContentItem {
+		return anthropicschema.ToolResultContentItem{Image: &anthropicschema.ImageBlockParam{Type: "image", Source: anthropicschema.ImageSource{
+			URL: &anthropicschema.URLImageSource{Type: "url", URL: u},
+		}}}
+	}
+	txt := func(s string) anthropicschema.ToolResultContentItem {
+		return anthropicschema.ToolResultContentItem{Text: &anthropicschema.TextBlockParam{Type: "text", Text: s}}
+	}
+	result := func(id string, items ...anthropicschema.ToolResultContentItem) anthropicschema.ContentBlockParam {
+		return anthropicschema.ContentBlockParam{ToolResult: &anthropicschema.ToolResultBlockParam{
+			Type: "tool_result", ToolUseID: id,
+			Content: &anthropicschema.ToolResultContent{Array: items},
+		}}
+	}
+	call := func(id, name string) anthropicschema.ContentBlockParam {
+		return anthropicschema.ContentBlockParam{ToolUse: &anthropicschema.ToolUseBlockParam{Type: "tool_use", ID: id, Name: name, Input: map[string]any{}}}
+	}
+	signed := anthropicschema.ContentBlockParam{Thinking: &anthropicschema.ThinkingBlockParam{Type: "thinking", Signature: "c2ln"}}
+
+	build := func(model string, results ...anthropicschema.ContentBlockParam) (string, error) {
+		req := &anthropicschema.MessagesRequest{
+			Model: model, MaxTokens: 100,
+			Messages: []anthropicschema.MessageParam{
+				{Role: anthropicschema.MessageRoleUser, Content: anthropicschema.MessageContent{Text: "Look"}},
+				{Role: anthropicschema.MessageRoleAssistant, Content: anthropicschema.MessageContent{Array: []anthropicschema.ContentBlockParam{signed, call("t1", "screenshot"), call("t2", "read")}}},
+				{Role: anthropicschema.MessageRoleUser, Content: anthropicschema.MessageContent{Array: results}},
+			},
+		}
+		_, body, err := NewAnthropicToGCPVertexAITranslator("").RequestBody(nil, req, false)
+		if err != nil {
+			return "", err
+		}
+		var got struct {
+			Contents json.RawMessage `json:"contents"`
+		}
+		require.NoError(t, json.Unmarshal(body, &got))
+		return string(got.Contents), nil
+	}
+
+	const modelTurn = `{"role":"model","parts":[
+		{"functionCall":{"name":"screenshot"},"thoughtSignature":"c2ln"},
+		{"functionCall":{"name":"read"}}]}`
+
+	t.Run("base64 image with text, other result stays text-only, signature kept", func(t *testing.T) {
+		got, err := build("gemini-4-neon",
+			result("t1", txt("Screenshot taken."), b64("image/png")),
+			result("t2", txt("file contents")))
+		require.NoError(t, err)
+		require.JSONEq(t, `[
+			{"role":"user","parts":[{"text":"Look"}]},
+			`+modelTurn+`,
+			{"role":"user","parts":[
+				{"functionResponse":{"name":"screenshot",
+					"response":{"output":"Screenshot taken.","image_1":{"$ref":"image_1"}},
+					"parts":[{"inlineData":{"mimeType":"image/png","data":"aW1hZ2U=","displayName":"image_1"}}]}},
+				{"functionResponse":{"name":"read","response":{"output":"file contents"}}}
+			]}
+		]`, got)
+	})
+
+	t.Run("image on the second result lands on the second functionResponse", func(t *testing.T) {
+		got, err := build("gemini-3.1-pro-preview",
+			result("t1", txt("only text")),
+			result("t2", b64("image/jpeg"), txt("a"), b64("image/webp")))
+		require.NoError(t, err)
+		require.JSONEq(t, `[
+			{"role":"user","parts":[{"text":"Look"}]},
+			`+modelTurn+`,
+			{"role":"user","parts":[
+				{"functionResponse":{"name":"screenshot","response":{"output":"only text"}}},
+				{"functionResponse":{"name":"read",
+					"response":{"output":"a","image_1":{"$ref":"image_1"},"image_2":{"$ref":"image_2"}},
+					"parts":[
+						{"inlineData":{"mimeType":"image/jpeg","data":"aW1hZ2U=","displayName":"image_1"}},
+						{"inlineData":{"mimeType":"image/webp","data":"aW1hZ2U=","displayName":"image_2"}}]}}
+			]}
+		]`, got)
+	})
+
+	t.Run("URL images are passed to Vertex as fileData, never fetched", func(t *testing.T) {
+		got, err := build("gemini-4-neon",
+			result("t1", imgURL("gs://bucket/shot.png")),
+			result("t2", imgURL("https://example.com/render?id=1")))
+		require.NoError(t, err)
+		require.JSONEq(t, `[
+			{"role":"user","parts":[{"text":"Look"}]},
+			`+modelTurn+`,
+			{"role":"user","parts":[
+				{"functionResponse":{"name":"screenshot","response":{"image_1":{"$ref":"image_1"}},
+					"parts":[{"fileData":{"fileUri":"gs://bucket/shot.png","mimeType":"image/png","displayName":"image_1"}}]}},
+				{"functionResponse":{"name":"read","response":{"image_1":{"$ref":"image_1"}},
+					"parts":[{"fileData":{"fileUri":"https://example.com/render?id=1","mimeType":"image/jpeg","displayName":"image_1"}}]}}
+			]}
+		]`, got)
+	})
+
+	t.Run("text-only results are unchanged", func(t *testing.T) {
+		got, err := build("gemini-2.5-flash", result("t1", txt("a"), txt("b")), result("t2", txt("c")))
+		require.NoError(t, err)
+		require.Contains(t, got, `{"functionResponse":{"name":"screenshot","response":{"output":"ab"}}}`)
+		require.NotContains(t, got, `"parts":[{"inlineData"`)
+	})
+
+	errTests := []struct {
+		name    string
+		model   string
+		item    anthropicschema.ToolResultContentItem
+		wantErr string
+	}{
+		{"model before Gemini 3", "gemini-2.5-flash", b64("image/png"), "require a Gemini 3 or later model"},
+		{"unsupported media type", "gemini-4-neon", b64("image/gif"), `media_type "image/gif" is not supported`},
+		{"invalid base64", "gemini-4-neon", anthropicschema.ToolResultContentItem{Image: &anthropicschema.ImageBlockParam{Type: "image", Source: anthropicschema.ImageSource{
+			Base64: &anthropicschema.Base64ImageSource{Type: "base64", MediaType: "image/png", Data: "not base64!"},
+		}}}, "must be base64"},
+		{"empty base64 data", "gemini-4-neon", anthropicschema.ToolResultContentItem{Image: &anthropicschema.ImageBlockParam{Type: "image", Source: anthropicschema.ImageSource{
+			Base64: &anthropicschema.Base64ImageSource{Type: "base64", MediaType: "image/png"},
+		}}}, "media_type and data are required"},
+		{"empty URL", "gemini-4-neon", imgURL(" "), "image URL must not be empty"},
+		{"file URL", "gemini-4-neon", imgURL("file:///etc/passwd"), "must be an http, https or gs URL"},
+		{"URL without host", "gemini-4-neon", imgURL("https:///x.png"), "must be an http, https or gs URL"},
+		{"gif URL", "gemini-4-neon", imgURL("https://example.com/a.gif"), `type "image/gif" is not supported`},
+		{"no source", "gemini-4-neon", anthropicschema.ToolResultContentItem{Image: &anthropicschema.ImageBlockParam{Type: "image"}}, "image source type is not supported"},
+		{"document", "gemini-4-neon", anthropicschema.ToolResultContentItem{Document: &anthropicschema.DocumentBlockParam{Type: "document"}}, "document and search_result content are not supported"},
+	}
+	for _, tc := range errTests {
+		t.Run("error: "+tc.name, func(t *testing.T) {
+			_, err := build(tc.model, result("t1", tc.item), result("t2", txt("x")))
+			require.ErrorIs(t, err, internalapi.ErrInvalidRequestBody)
+			require.ErrorContains(t, err, tc.wantErr)
+		})
+	}
+}

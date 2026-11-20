@@ -802,3 +802,33 @@ func TestAnthropicToGCPAnthropicTranslator_RequestBody_PassesThroughEffortAndAda
 	require.Equal(t, map[string]any{"type": "adaptive"}, got["thinking"])
 	require.Equal(t, map[string]any{"effort": "xhigh"}, got["output_config"])
 }
+
+// Images nested in tool_result content reach Claude on Vertex untouched.
+func TestAnthropicToGCPAnthropicTranslator_RequestBody_PassesThroughToolResultImages(t *testing.T) {
+	parsedReq := &anthropic.MessagesRequest{
+		Model:     "claude-opus-4-5",
+		MaxTokens: 100,
+		Messages: []anthropic.MessageParam{{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Array: []anthropic.ContentBlockParam{{
+			ToolResult: &anthropic.ToolResultBlockParam{Type: "tool_result", ToolUseID: "t1", Content: &anthropic.ToolResultContent{Array: []anthropic.ToolResultContentItem{
+				{Text: &anthropic.TextBlockParam{Type: "text", Text: "shot"}},
+				{Image: &anthropic.ImageBlockParam{Type: "image", Source: anthropic.ImageSource{Base64: &anthropic.Base64ImageSource{Type: "base64", MediaType: "image/png", Data: "aW1hZ2U="}}}},
+			}}},
+		}}}}},
+	}
+	raw, err := json.Marshal(parsedReq)
+	require.NoError(t, err)
+	_, body, err := NewAnthropicToGCPAnthropicTranslator("2023-06-01", "").RequestBody(raw, parsedReq, false)
+	require.NoError(t, err)
+	var got struct {
+		Messages []struct {
+			Content []struct {
+				Content []map[string]any `json:"content"`
+			} `json:"content"`
+		} `json:"messages"`
+	}
+	require.NoError(t, json.Unmarshal(body, &got))
+	items := got.Messages[0].Content[0].Content
+	require.Len(t, items, 2)
+	require.Equal(t, "image", items[1]["type"])
+	require.Equal(t, map[string]any{"type": "base64", "media_type": "image/png", "data": "aW1hZ2U="}, items[1]["source"])
+}

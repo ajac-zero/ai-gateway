@@ -13,7 +13,11 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"mime"
+	neturl "net/url"
+	"path"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -21,6 +25,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/anthropic"
+	"github.com/envoyproxy/ai-gateway/internal/apischema/gcp"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/json"
@@ -77,6 +82,9 @@ func (a *anthropicToGCPVertexAITranslator) RequestBody(_ []byte, body *anthropic
 	openAIReq.ReasoningEffort = ""
 	gcpReq, err := a.geminiTranslator.openAIMessageToGeminiMessage(openAIReq, a.requestModel)
 	if err != nil {
+		return nil, nil, err
+	}
+	if err = attachToolResultImages(gcpReq, body, a.requestModel); err != nil {
 		return nil, nil, err
 	}
 	if len(body.StopSequences) > 0 {
@@ -195,6 +203,22 @@ func validateAnthropicToGCPVertexAIRequest(body *anthropic.MessagesRequest) erro
 	return nil
 }
 
+func validateAnthropicImageSourceForGCPVertexAI(source anthropic.ImageSource) error {
+	switch {
+	case source.URL != nil:
+		if strings.TrimSpace(source.URL.URL) == "" {
+			return fmt.Errorf("%w: image URL must not be empty for GCP Vertex AI translation", internalapi.ErrInvalidRequestBody)
+		}
+	case source.Base64 != nil:
+		if source.Base64.MediaType == "" || source.Base64.Data == "" {
+			return fmt.Errorf("%w: base64 image media_type and data are required for GCP Vertex AI translation", internalapi.ErrInvalidRequestBody)
+		}
+	default:
+		return fmt.Errorf("%w: image source type is not supported for GCP Vertex AI translation", internalapi.ErrInvalidRequestBody)
+	}
+	return nil
+}
+
 func validateAnthropicContentBlockForGCPVertexAI(role anthropic.MessageRole, block *anthropic.ContentBlockParam) error {
 	switch {
 	case block.Text != nil:
@@ -203,19 +227,7 @@ func validateAnthropicContentBlockForGCPVertexAI(role anthropic.MessageRole, blo
 		if role != anthropic.MessageRoleUser {
 			return fmt.Errorf("%w: image content is only supported in user messages for GCP Vertex AI", internalapi.ErrInvalidRequestBody)
 		}
-		switch {
-		case block.Image.Source.URL != nil:
-			if strings.TrimSpace(block.Image.Source.URL.URL) == "" {
-				return fmt.Errorf("%w: image URL must not be empty for GCP Vertex AI translation", internalapi.ErrInvalidRequestBody)
-			}
-		case block.Image.Source.Base64 != nil:
-			if block.Image.Source.Base64.MediaType == "" || block.Image.Source.Base64.Data == "" {
-				return fmt.Errorf("%w: base64 image media_type and data are required for GCP Vertex AI translation", internalapi.ErrInvalidRequestBody)
-			}
-		default:
-			return fmt.Errorf("%w: image source type is not supported for GCP Vertex AI translation", internalapi.ErrInvalidRequestBody)
-		}
-		return nil
+		return validateAnthropicImageSourceForGCPVertexAI(block.Image.Source)
 	case block.ToolUse != nil:
 		if role != anthropic.MessageRoleAssistant {
 			return fmt.Errorf("%w: tool_use content is only supported in assistant messages", internalapi.ErrInvalidRequestBody)
@@ -264,9 +276,113 @@ func validateAnthropicToolResultForGCPVertexAI(toolResult *anthropic.ToolResultB
 		return nil
 	}
 	for _, item := range toolResult.Content.Array {
-		if item.Image != nil || item.Document != nil || item.SearchResult != nil {
-			return fmt.Errorf("%w: tool_result image, document, and search_result content are not supported for GCP Vertex AI translation", internalapi.ErrInvalidRequestBody)
+		if item.Document != nil || item.SearchResult != nil {
+			return fmt.Errorf("%w: tool_result document and search_result content are not supported for GCP Vertex AI translation", internalapi.ErrInvalidRequestBody)
 		}
+		if item.Image != nil {
+			if err := validateAnthropicImageSourceForGCPVertexAI(item.Image.Source); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// functionResponseImageMIMETypes are the image types Vertex accepts inside a functionResponse.
+// https://docs.cloud.google.com/vertex-ai/generative-ai/docs/multimodal/function-calling#multimodal-function-responses
+var functionResponseImageMIMETypes = []string{"image/png", "image/jpeg", "image/webp"}
+
+// anthropicToolResultImageToFunctionResponsePart converts an Anthropic tool_result image to a
+// functionResponse part. Base64 data is sent inline. A URL is passed to Vertex as fileData and is
+// never fetched by the gateway; only http, https and gs URLs are accepted.
+func anthropicToolResultImageToFunctionResponsePart(source anthropic.ImageSource, displayName string) (*genai.FunctionResponsePart, error) {
+	if source.Base64 != nil {
+		mimeType := strings.ToLower(source.Base64.MediaType)
+		if !slices.Contains(functionResponseImageMIMETypes, mimeType) {
+			return nil, fmt.Errorf("%w: tool_result image media_type %q is not supported for GCP Vertex AI (supported: %s)", internalapi.ErrInvalidRequestBody, source.Base64.MediaType, strings.Join(functionResponseImageMIMETypes, ", "))
+		}
+		data, err := base64.StdEncoding.DecodeString(source.Base64.Data)
+		if err != nil {
+			return nil, fmt.Errorf("%w: tool_result image data must be base64: %w", internalapi.ErrInvalidRequestBody, err)
+		}
+		return &genai.FunctionResponsePart{InlineData: &genai.FunctionResponseBlob{MIMEType: mimeType, Data: data, DisplayName: displayName}}, nil
+	}
+	rawURL := strings.TrimSpace(source.URL.URL)
+	parsed, err := neturl.Parse(rawURL)
+	if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http" && parsed.Scheme != "gs") || parsed.Host == "" {
+		return nil, fmt.Errorf("%w: tool_result image URL must be an http, https or gs URL", internalapi.ErrInvalidRequestBody)
+	}
+	// Like user images, infer the type from the extension and default to JPEG.
+	mimeType := mimeTypeImageJPEG
+	if mt := mime.TypeByExtension(path.Ext(parsed.Path)); mt != "" {
+		mimeType = mt
+	}
+	if !slices.Contains(functionResponseImageMIMETypes, mimeType) {
+		return nil, fmt.Errorf("%w: tool_result image URL type %q is not supported for GCP Vertex AI (supported: %s)", internalapi.ErrInvalidRequestBody, mimeType, strings.Join(functionResponseImageMIMETypes, ", "))
+	}
+	return &genai.FunctionResponsePart{FileData: &genai.FunctionResponseFileData{FileURI: rawURL, MIMEType: mimeType, DisplayName: displayName}}, nil
+}
+
+// attachToolResultImages adds the images of Anthropic tool_result blocks to the functionResponse
+// parts built from them. The OpenAI intermediate form only carries tool text, and it turns every
+// tool_result block into exactly one functionResponse part in the same order, so the n-th
+// functionResponse belongs to the n-th tool_result. The text stays in response.output and each image
+// becomes a nested part that the response references with {"$ref": "image_N"}, as in Google's
+// multimodal function response format. Only Gemini 3 and later accept this.
+func attachToolResultImages(gcpReq *gcp.GenerateContentRequest, body *anthropic.MessagesRequest, model internalapi.RequestModel) error {
+	var results []*anthropic.ToolResultBlockParam
+	for i := range body.Messages {
+		for j := range body.Messages[i].Content.Array {
+			if tr := body.Messages[i].Content.Array[j].ToolResult; tr != nil {
+				results = append(results, tr)
+			}
+		}
+	}
+	var responses []*genai.FunctionResponse
+	for ci := range gcpReq.Contents {
+		for _, part := range gcpReq.Contents[ci].Parts {
+			if part != nil && part.FunctionResponse != nil {
+				responses = append(responses, part.FunctionResponse)
+			}
+		}
+	}
+	if len(results) != len(responses) {
+		return fmt.Errorf("internal error: %d tool_result blocks became %d functionResponse parts", len(results), len(responses))
+	}
+	for i, tr := range results {
+		if tr.Content == nil {
+			continue
+		}
+		var parts []*genai.FunctionResponsePart
+		for _, item := range tr.Content.Array {
+			if item.Image == nil {
+				continue
+			}
+			if geminiMajorVersion(model) < 3 {
+				return fmt.Errorf("%w: tool_result images require a Gemini 3 or later model on GCP Vertex AI", internalapi.ErrInvalidRequestBody)
+			}
+			name := fmt.Sprintf("image_%d", len(parts)+1)
+			part, err := anthropicToolResultImageToFunctionResponsePart(item.Image.Source, name)
+			if err != nil {
+				return err
+			}
+			parts = append(parts, part)
+		}
+		if len(parts) == 0 {
+			continue
+		}
+		fr := responses[i]
+		if fr.Response == nil {
+			fr.Response = map[string]any{}
+		}
+		if out, ok := fr.Response["output"].(string); ok && out == "" {
+			delete(fr.Response, "output")
+		}
+		for n := range parts {
+			name := fmt.Sprintf("image_%d", n+1)
+			fr.Response[name] = map[string]any{"$ref": name}
+		}
+		fr.Parts = parts
 	}
 	return nil
 }
@@ -278,12 +394,20 @@ var geminiMajorVersionRe = regexp.MustCompile(`gemini-(\d+)`)
 // Earlier models reject it and only support thinkingBudget.
 // https://docs.cloud.google.com/vertex-ai/generative-ai/docs/thinking
 func supportsThinkingLevel(model internalapi.RequestModel) bool {
+	return geminiMajorVersion(model) >= 3
+}
+
+// geminiMajorVersion returns the major version of a Gemini model name, or 0 when it has none.
+func geminiMajorVersion(model internalapi.RequestModel) int {
 	m := geminiMajorVersionRe.FindStringSubmatch(strings.ToLower(model))
 	if m == nil {
-		return false
+		return 0
 	}
 	major, err := strconv.Atoi(m[1])
-	return err == nil && major >= 3
+	if err != nil {
+		return 0
+	}
+	return major
 }
 
 // anthropicEffortToThinkingLevel maps output_config.effort to a Gemini thinking level.
