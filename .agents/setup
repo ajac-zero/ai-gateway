@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# Copyright Envoy AI Gateway Authors
+# SPDX-License-Identifier: Apache-2.0
+# The full text of the Apache license is available in the LICENSE file at
+# the root of the repo.
+
+# Amp orb setup for the fork. Installs the pinned Go toolchain and jj, warms the Go caches,
+# and bootstraps the jj patch workflow. Idempotent.
+
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+JJ_VERSION="0.43.0"
+JJ_FORK_VERSION="0.2.9"
+JJ_FORK_SHA256="4fd2f99fcbfddfffbbede8618bec41593d57b332eae1544be89a457c02322a93" # x86_64-unknown-linux-gnu
+GO_VERSION="$(awk '$1 == "go" { print $2; exit }' go.mod)"
+prefix="$HOME/.local"
+mkdir -p "$prefix/bin"
+
+step() { printf '[setup %(%H:%M:%S)T] %s\n' -1 "$*"; }
+
+profile_marker="# ai-gateway fork toolchain"
+if ! grep -Fqx "$profile_marker" "$HOME/.bash_profile" 2>/dev/null; then
+  cat >>"$HOME/.bash_profile" <<EOF
+
+$profile_marker
+export PATH="$prefix/go/bin:$prefix/bin:\$HOME/go/bin:\$PATH"
+EOF
+fi
+export PATH="$prefix/go/bin:$prefix/bin:$HOME/go/bin:$PATH"
+
+if [[ "$(go env GOVERSION 2>/dev/null || true)" != "go$GO_VERSION" ]]; then
+  step "installing Go $GO_VERSION"
+  rm -rf "$prefix/go"
+  curl -fsSL "https://go.dev/dl/go$GO_VERSION.linux-amd64.tar.gz" | tar -xz -C "$prefix"
+fi
+
+if [[ "$(jj --version 2>/dev/null | awk '{print $2}' | cut -d- -f1)" != "$JJ_VERSION" ]]; then
+  step "installing jj $JJ_VERSION"
+  curl -fsSL "https://github.com/jj-vcs/jj/releases/download/v$JJ_VERSION/jj-v$JJ_VERSION-x86_64-unknown-linux-musl.tar.gz" |
+    tar -xz -C "$prefix/bin" ./jj
+fi
+
+if [[ "$(jj-fork --version 2>/dev/null | awk '{print $2}')" != "$JJ_FORK_VERSION" ]]; then
+  step "installing jj-fork $JJ_FORK_VERSION"
+  archive="jj-fork-v$JJ_FORK_VERSION-x86_64-unknown-linux-gnu"
+  tmp="$(mktemp -d)"
+  curl -fsSL -o "$tmp/$archive.tar.gz" \
+    "https://github.com/ajac-zero/jj-fork/releases/download/v$JJ_FORK_VERSION/$archive.tar.gz"
+  echo "$JJ_FORK_SHA256  $tmp/$archive.tar.gz" | sha256sum -c -
+  tar -xzf "$tmp/$archive.tar.gz" -C "$tmp"
+  install -m 0755 "$tmp/$archive/jj-fork" "$prefix/bin/jj-fork"
+  rm -rf "$tmp"
+fi
+
+step "downloading Go modules"
+go mod download
+go mod download -modfile=tools/go.mod
+
+step "warming build and tool caches"
+go build ./...
+go tool -modfile=tools/go.mod golangci-lint version >/dev/null
+go tool -modfile=tools/go.mod license-eye --help >/dev/null
+
+step "bootstrapping jj-fork"
+if [[ "$(jj --version | awk '{print $2}' | cut -d- -f1)" != "$JJ_VERSION" ]]; then
+  echo "jj-fork requires jj $JJ_VERSION" >&2
+  exit 1
+fi
+jj-fork init   # remotes, full history, tracking, revset aliases
+jj-fork alias  # `jj fork` runs jj-fork
+
+step "done"

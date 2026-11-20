@@ -493,3 +493,30 @@ func TestRedactAnthropicBody_RefusalStopDetails(t *testing.T) {
 		})
 	}
 }
+
+// The native Anthropic backend forwards the original body, including output_config and
+// adaptive thinking, without translation.
+func TestAnthropicToAnthropic_RequestBody_PassesThroughEffortAndAdaptiveThinking(t *testing.T) {
+	original := []byte(`{"model":"claude-opus-4-5","max_tokens":100,"thinking":{"type":"adaptive"},"output_config":{"effort":"max"},"messages":[{"role":"user","content":"Hi"}]}`)
+	body := anthropicschema.MessagesRequest{
+		Model:        "claude-opus-4-5",
+		Thinking:     &anthropicschema.Thinking{Adaptive: &anthropicschema.ThinkingAdaptive{Type: "adaptive"}},
+		OutputConfig: &anthropicschema.OutputConfig{Effort: anthropicschema.OutputConfigEffortMax},
+	}
+	_, newBody, err := NewAnthropicToAnthropicTranslator("v1", "").RequestBody(original, &body, false)
+	require.NoError(t, err)
+	require.Nil(t, newBody, "body must be forwarded unmodified")
+
+	_, newBody, err = NewAnthropicToAnthropicTranslator("v1", "claude-override").RequestBody(original, &body, false)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"model":"claude-override","max_tokens":100,"thinking":{"type":"adaptive"},"output_config":{"effort":"max"},"messages":[{"role":"user","content":"Hi"}]}`, string(newBody))
+}
+
+// Images nested in tool_result content are forwarded to the native Anthropic backend untouched.
+func TestAnthropicToAnthropic_RequestBody_PassesThroughToolResultImages(t *testing.T) {
+	original := []byte(`{"model":"claude-opus-4-5","max_tokens":100,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":"shot"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aW1hZ2U="}}]}]}]}`)
+	body := anthropicschema.MessagesRequest{Model: "claude-opus-4-5"}
+	_, newBody, err := NewAnthropicToAnthropicTranslator("v1", "").RequestBody(original, &body, false)
+	require.NoError(t, err)
+	require.Nil(t, newBody)
+}

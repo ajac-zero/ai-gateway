@@ -26,6 +26,8 @@ func TestNewTraceConfig_Defaults(t *testing.T) {
 	require.Equal(t, defaultHideEmbeddingsText, config.HideEmbeddingsText)
 	require.Equal(t, defaultBase64ImageMaxLength, config.Base64ImageMaxLength)
 	require.Equal(t, defaultHidePrompts, config.HidePrompts)
+	require.Equal(t, defaultHideChoices, config.HideChoices)
+	require.Equal(t, defaultHideTools, config.HideTools)
 }
 
 func TestNewTraceConfigFromEnv(t *testing.T) {
@@ -48,6 +50,8 @@ func TestNewTraceConfigFromEnv(t *testing.T) {
 				EnvHideEmbeddingsVectors:       "true",
 				EnvHideEmbeddingsText:          "true",
 				EnvHidePrompts:                 "true",
+				EnvHideChoices:                 "true",
+				EnvHideTools:                   "true",
 				EnvBase64ImageMaxLength:        "10000",
 			},
 			validate: func(t *testing.T, config *TraceConfig) {
@@ -62,6 +66,8 @@ func TestNewTraceConfigFromEnv(t *testing.T) {
 				require.True(t, config.HideEmbeddingsVectors)
 				require.True(t, config.HideEmbeddingsText)
 				require.True(t, config.HidePrompts)
+				require.True(t, config.HideChoices)
+				require.True(t, config.HideTools)
 				require.Equal(t, 10000, config.Base64ImageMaxLength)
 			},
 		},
@@ -79,6 +85,8 @@ func TestNewTraceConfigFromEnv(t *testing.T) {
 				EnvHideEmbeddingsVectors:       "false",
 				EnvHideEmbeddingsText:          "false",
 				EnvHidePrompts:                 "false",
+				EnvHideChoices:                 "false",
+				EnvHideTools:                   "false",
 				EnvBase64ImageMaxLength:        "50000",
 			},
 			validate: func(t *testing.T, config *TraceConfig) {
@@ -93,6 +101,8 @@ func TestNewTraceConfigFromEnv(t *testing.T) {
 				require.False(t, config.HideEmbeddingsVectors)
 				require.False(t, config.HideEmbeddingsText)
 				require.False(t, config.HidePrompts)
+				require.False(t, config.HideChoices)
+				require.False(t, config.HideTools)
 				require.Equal(t, 50000, config.Base64ImageMaxLength)
 			},
 		},

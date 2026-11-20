@@ -130,6 +130,15 @@ func (m *mcpRequestContext) recordPOSTCompletion(c *postCompletion) {
 		c.span.RecordClientSession(string(c.session.clientGatewaySessionID()))
 	}
 
+	// The inbound request has been fully handled (result or error produced), so
+	// record the server-side operation duration regardless of how legacy metrics
+	// are recorded. Bodies that are not a JSON-RPC request (empty method) are skipped.
+	if c.method != "" {
+		if om, ok := m.metrics.(metrics.MCPOperationMetrics); ok {
+			om.RecordServerOperationDuration(c.ctx, c.startAt, c.method, c.params, c.err)
+		}
+	}
+
 	if m.perBackendMetricsRecorded {
 		endMCPSpan(c.span, c.errType, c.err)
 		return

@@ -159,11 +159,13 @@ func buildRequestAttributes(req *anthropic.MessagesRequest, body string, config 
 	}
 
 	// Add indexed attributes for each tool.
-	for i, tool := range req.Tools {
-		if toolJSON, err := json.Marshal(tool); err == nil {
-			attrs = append(attrs,
-				attribute.String(fmt.Sprintf("%s.%d.tool.json_schema", openinference.LLMTools, i), string(toolJSON)),
-			)
+	if !config.HideTools {
+		for i, tool := range req.Tools {
+			if toolJSON, err := json.Marshal(tool); err == nil {
+				attrs = append(attrs,
+					attribute.String(fmt.Sprintf("%s.%d.tool.json_schema", openinference.LLMTools, i), string(toolJSON)),
+				)
+			}
 		}
 	}
 	return attrs

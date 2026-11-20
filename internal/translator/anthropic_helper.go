@@ -896,6 +896,8 @@ type anthropicStreamParser struct {
 	refusalExplanation string
 	refusalCategory    string
 	requestModel       internalapi.RequestModel
+	responseModel      internalapi.ResponseModel
+	useResponseModel   bool
 	sentFirstChunk     bool
 	created            openai.JSONUNIXTime
 }
@@ -920,6 +922,13 @@ func newAnthropicStreamParser(requestModel string) *anthropicStreamParser {
 		activeToolCalls: make(map[int64]*streamingToolCall),
 		toolIndex:       toolIdx,
 	}
+}
+
+func (p *anthropicStreamParser) model() string {
+	if p.useResponseModel && p.responseModel != "" {
+		return p.responseModel
+	}
+	return p.requestModel
 }
 
 func (p *anthropicStreamParser) writeChunk(eventBlock []byte, buf *[]byte) error {
@@ -1028,7 +1037,7 @@ func (p *anthropicStreamParser) Process(body io.Reader, endOfStream bool, span t
 ) {
 	newBody = make([]byte, 0)
 	_ = span // TODO: add support for streaming chunks in tracing.
-	responseModel = p.requestModel
+	responseModel = p.model()
 	if _, err = p.buffer.ReadFrom(body); err != nil {
 		err = fmt.Errorf("failed to read from stream body: %w", err)
 		return
@@ -1082,7 +1091,7 @@ func (p *anthropicStreamParser) Process(body io.Reader, endOfStream bool, span t
 					ReasoningTokens: int(reasoningTokens),
 				},
 			},
-			Model: p.requestModel,
+			Model: p.model(),
 		}
 
 		// Add active tool calls to the final chunk.
@@ -1120,6 +1129,7 @@ func (p *anthropicStreamParser) Process(body io.Reader, endOfStream bool, span t
 		newBody = append(newBody, '\n', '\n')
 	}
 	tokenUsage = p.tokenUsage
+	responseModel = p.model()
 	return
 }
 
@@ -1154,6 +1164,7 @@ func (p *anthropicStreamParser) handleAnthropicStreamEvent(eventType []byte, dat
 			return nil, fmt.Errorf("unmarshal message_start: %w", err)
 		}
 		p.activeMessageID = event.Message.ID
+		p.responseModel = event.Message.Model
 		p.created = openai.JSONUNIXTime(time.Now())
 		u := event.Message.Usage
 		usage := metrics.ExtractTokenUsageFromExplicitCaching(
@@ -1385,7 +1396,7 @@ func (p *anthropicStreamParser) constructOpenAIChatCompletionChunk(delta *openai
 				FinishReason: finishReason,
 			},
 		},
-		Model: p.requestModel,
+		Model: p.model(),
 	}
 }
 

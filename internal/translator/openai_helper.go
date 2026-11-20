@@ -271,66 +271,70 @@ func appendAnthropicUserMessage(messages []openai.ChatCompletionMessageParamUnio
 		})
 	}
 
-	// Build structured content parts in a single pass. If image blocks are present,
-	// use the structured array format; otherwise, fall back to plain string for compatibility.
-	var parts []openai.ChatCompletionContentPartUserUnionParam
-	hasImages := false
-	for _, block := range msg.Content.Array {
-		switch {
-		case block.Text != nil:
-			parts = append(parts, openai.ChatCompletionContentPartUserUnionParam{
-				OfText: &openai.ChatCompletionContentPartTextParam{
-					Type: string(openai.ChatCompletionContentPartTextTypeText),
-					Text: block.Text.Text,
-				},
-			})
-		case block.Image != nil:
-			hasImages = true
-			url := anthropicImageSourceToURL(block.Image.Source)
-			parts = append(parts, openai.ChatCompletionContentPartUserUnionParam{
-				OfImageURL: &openai.ChatCompletionContentPartImageParam{
-					Type: openai.ChatCompletionContentPartImageTypeImageURL,
-					ImageURL: openai.ChatCompletionContentPartImageImageURLParam{
-						URL: url,
-					},
-				},
-			})
-		}
-	}
-	if hasImages {
-		if len(parts) > 0 {
-			messages = append(messages, openai.ChatCompletionMessageParamUnion{
-				OfUser: &openai.ChatCompletionUserMessageParam{
-					Content: openai.StringOrUserRoleContentUnion{Value: parts},
-					Role:    openai.ChatMessageRoleUser,
-				},
-			})
-		}
-	} else {
-		text := anthropicContentToText(msg.Content)
-		if text != "" {
-			messages = append(messages, openai.ChatCompletionMessageParamUnion{
-				OfUser: &openai.ChatCompletionUserMessageParam{
-					Content: openai.StringOrUserRoleContentUnion{Value: text},
-					Role:    openai.ChatMessageRoleUser,
-				},
-			})
-		}
+	// Emit user text if there is any non-tool-result content.
+	content, ok := anthropicUserContentToOpenAI(msg.Content)
+	if ok {
+		messages = append(messages, openai.ChatCompletionMessageParamUnion{
+			OfUser: &openai.ChatCompletionUserMessageParam{
+				Content: openai.StringOrUserRoleContentUnion{Value: content},
+				Role:    openai.ChatMessageRoleUser,
+			},
+		})
 	}
 
 	return messages
 }
 
-// anthropicImageSourceToURL converts an Anthropic ImageSource to an OpenAI-compatible URL.
-func anthropicImageSourceToURL(source anthropic.ImageSource) string {
-	switch {
-	case source.Base64 != nil:
-		return fmt.Sprintf("data:%s;base64,%s", source.Base64.MediaType, source.Base64.Data)
-	case source.URL != nil:
-		return source.URL.URL
-	default:
-		return ""
+func anthropicUserContentToOpenAI(content anthropic.MessageContent) (any, bool) {
+	if content.Text != "" {
+		return content.Text, true
 	}
+
+	parts := make([]openai.ChatCompletionContentPartUserUnionParam, 0, len(content.Array))
+	var text strings.Builder
+	hasImage := false
+	for _, block := range content.Array {
+		switch {
+		case block.Text != nil:
+			if block.Text.Text != "" {
+				text.WriteString(block.Text.Text)
+				parts = append(parts, openai.ChatCompletionContentPartUserUnionParam{
+					OfText: &openai.ChatCompletionContentPartTextParam{
+						Type: string(openai.ChatCompletionContentPartTextTypeText),
+						Text: block.Text.Text,
+					},
+				})
+			}
+		case block.Image != nil:
+			imageURL := anthropicImageSourceToOpenAIURL(block.Image.Source)
+			hasImage = true
+			parts = append(parts, openai.ChatCompletionContentPartUserUnionParam{
+				OfImageURL: &openai.ChatCompletionContentPartImageParam{
+					Type: openai.ChatCompletionContentPartImageTypeImageURL,
+					ImageURL: openai.ChatCompletionContentPartImageImageURLParam{
+						URL: imageURL,
+					},
+				},
+			})
+		}
+	}
+	if len(parts) == 0 {
+		return "", false
+	}
+	if !hasImage {
+		return text.String(), true
+	}
+	return parts, true
+}
+
+func anthropicImageSourceToOpenAIURL(source anthropic.ImageSource) string {
+	if source.URL != nil {
+		return source.URL.URL
+	}
+	if source.Base64 != nil {
+		return fmt.Sprintf("data:%s;base64,%s", source.Base64.MediaType, source.Base64.Data)
+	}
+	return ""
 }
 
 // toolResultToText extracts text from a ToolResultBlockParam.
@@ -709,8 +713,9 @@ type sseMessageDeltaBody struct {
 }
 
 type sseOutputUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens          *int `json:"input_tokens,omitempty"`
+	CacheReadInputTokens *int `json:"cache_read_input_tokens,omitempty"`
+	OutputTokens         int  `json:"output_tokens"`
 }
 
 type sseMessageStop struct {
@@ -719,21 +724,24 @@ type sseMessageStop struct {
 
 // openAIStreamToAnthropicState tracks the state for converting OpenAI SSE chunks to Anthropic SSE events.
 type openAIStreamToAnthropicState struct {
-	buffer           bytes.Buffer
-	messageStarted   bool // flag indicating emitted message_start
-	hasOpenBlock     bool // flag indicating emitted content_block_start but not content_block_stop
-	hasThinkingBlock bool // flag indicating the open block is a thinking block
-	closingEmitted   bool // flag indicating emitted content_block_stop + message_delta + message_stop
-	messageID        string
-	model            string
-	stopReason       string // Anthropic stop_reason, mapped from OpenAI finish_reason
-	refusal          strings.Builder
-	inputTokens      int
-	outputTokens     int
-	tokenUsage       metrics.TokenUsage
-	blockIndex       int                       // current Anthropic content block index
-	activeTools      map[int64]*streamToolCall // keyed by OpenAI tool_call index
-	requestModel     string
+	buffer            bytes.Buffer
+	messageStarted    bool // flag indicating emitted message_start
+	hasOpenBlock      bool // flag indicating emitted content_block_start but not content_block_stop
+	hasThinkingBlock  bool // flag indicating the open block is a thinking block
+	hasSignature      bool // flag indicating the open thinking block already received its signature_delta
+	closingEmitted    bool // flag indicating emitted content_block_stop + message_delta + message_stop
+	messageID         string
+	model             string
+	stopReason        string // Anthropic stop_reason, mapped from OpenAI finish_reason
+	refusal           strings.Builder
+	inputTokens       int
+	cacheReadTokens   int
+	outputTokens      int
+	tokenUsage        metrics.TokenUsage
+	includeInputUsage bool
+	blockIndex        int                       // current Anthropic content block index
+	activeTools       map[int64]*streamToolCall // keyed by OpenAI tool_call index
+	requestModel      string
 }
 
 type streamToolCall struct {
@@ -819,13 +827,20 @@ func (s *openAIStreamToAnthropicState) handleChunk(chunk *openai.ChatCompletionR
 	if len(chunk.Choices) == 0 && chunk.Usage != nil {
 		s.inputTokens = chunk.Usage.PromptTokens
 		s.outputTokens = chunk.Usage.CompletionTokens
-		// OpenAI's cached_tokens/cache_write_tokens are a breakdown within
-		// prompt_tokens, not additive like Anthropic's native cache fields, so we don't
-		// forward them here to avoid double-counting.
+		// OpenAI's cached_tokens/cache_write_tokens are a breakdown within prompt_tokens,
+		// not additive like Anthropic's native cache fields. Only backends that report input
+		// usage separately (Vertex) split cache reads out of input tokens.
+		if s.includeInputUsage && chunk.Usage.PromptTokensDetails != nil {
+			s.cacheReadTokens = chunk.Usage.PromptTokensDetails.CachedTokens
+		}
+		cacheReadTokens := int64(0)
+		if s.includeInputUsage {
+			cacheReadTokens = int64(s.cacheReadTokens)
+		}
 		s.tokenUsage = metrics.ExtractTokenUsageFromExplicitCaching(
 			int64(s.inputTokens),
 			int64(s.outputTokens),
-			ptr.To(int64(0)),
+			ptr.To(cacheReadTokens),
 			ptr.To(int64(0)),
 		)
 		return s.emitClosingEvents(out)
@@ -853,11 +868,17 @@ func (s *openAIStreamToAnthropicState) handleChunk(chunk *openai.ChatCompletionR
 				return err
 			}
 		}
-		// Signatures ride on thinking_blocks (reasoning_content is a plain string).
+		// Signatures ride on thinking_blocks (reasoning_content is a plain string). Some backends
+		// repeat the reasoning_content text in the block, which must not be emitted twice.
+		reasoningEmitted := delta.ReasoningContent != nil && delta.ReasoningContent.Text != ""
 		for i := range delta.ThinkingBlocks {
 			tb := &delta.ThinkingBlocks[i]
+			text := tb.Thinking
+			if reasoningEmitted {
+				text = ""
+			}
 			if err := s.handleReasoningDelta(&openai.StreamReasoningContent{
-				Text: tb.Thinking, Signature: tb.Signature,
+				Text: text, Signature: tb.Signature,
 			}, out); err != nil {
 				return err
 			}
@@ -972,6 +993,12 @@ func (s *openAIStreamToAnthropicState) handleReasoningDelta(rc *openai.StreamRea
 	if rc.Text == "" && rc.Signature == "" {
 		return nil
 	}
+	// A signature ends a thinking block: later thinking text or another signature starts a new one.
+	if s.hasThinkingBlock && s.hasSignature {
+		if err := s.closeThinkingBlock(out); err != nil {
+			return err
+		}
+	}
 	// Close any open non-thinking block (e.g., text) before starting a thinking block.
 	// This handles the unlikely case where reasoning arrives after text content.
 	if !s.hasThinkingBlock && s.hasOpenBlock {
@@ -1006,6 +1033,7 @@ func (s *openAIStreamToAnthropicState) handleReasoningDelta(rc *openai.StreamRea
 func (s *openAIStreamToAnthropicState) emitThinkingBlockStart(out *[]byte) error {
 	s.hasOpenBlock = true
 	s.hasThinkingBlock = true
+	s.hasSignature = false
 	payload := sseContentBlockStartThinking{
 		Type:         "content_block_start",
 		Index:        s.blockIndex,
@@ -1036,6 +1064,7 @@ func (s *openAIStreamToAnthropicState) emitThinkingDelta(text string, out *[]byt
 
 // emitSignatureDelta emits a content_block_delta SSE event with a signature.
 func (s *openAIStreamToAnthropicState) emitSignatureDelta(signature string, out *[]byte) error {
+	s.hasSignature = true
 	payload := sseContentBlockDeltaSignature{
 		Type:  "content_block_delta",
 		Index: s.blockIndex,
@@ -1137,6 +1166,11 @@ func (s *openAIStreamToAnthropicState) emitClosingEvents(out *[]byte) error {
 		return nil
 	}
 	s.closingEmitted = true
+	if !s.messageStarted {
+		if err := s.emitMessageStart(out); err != nil {
+			return err
+		}
+	}
 
 	// Close the currently open content block.
 	if s.hasOpenBlock {
@@ -1162,13 +1196,20 @@ func (s *openAIStreamToAnthropicState) emitClosingEvents(out *[]byte) error {
 	}
 
 	// Backfill input_tokens here (not message_start): OpenAI doesn't report it until now.
+	usage := sseOutputUsage{OutputTokens: s.outputTokens}
+	if s.includeInputUsage {
+		inputTokens := max(s.inputTokens-s.cacheReadTokens, 0)
+		usage.InputTokens = &inputTokens
+		usage.CacheReadInputTokens = &s.cacheReadTokens
+	} else {
+		// OpenAI cached_tokens is already included in prompt_tokens, so do not expose it
+		// as an additional Anthropic cache-read count for non-Vertex backends.
+		usage.InputTokens = &s.inputTokens
+	}
 	msgDeltaPayload := sseMessageDelta{
 		Type:  "message_delta",
 		Delta: sseMessageDeltaBody{StopReason: stopReason, StopSequence: nil, StopDetails: stopDetails},
-		Usage: sseOutputUsage{
-			InputTokens:  s.inputTokens,
-			OutputTokens: s.outputTokens,
-		},
+		Usage: usage,
 	}
 	data, err := json.Marshal(msgDeltaPayload)
 	if err != nil {

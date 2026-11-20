@@ -234,6 +234,7 @@ func NewImageGenerationRecorder(config *Config) tracingapi.ImageGenerationRecord
 		operation:    OperationImageGeneration,
 		config:       configOrEnv(config),
 		requestModel: func(r *openai.ImageGenerationRequest) string { return r.Model },
+		requestAttrs: imageGenerationRequestAttrs,
 	}
 }
 
@@ -247,9 +248,11 @@ func NewResponsesRecorder(config *Config) tracingapi.ResponsesRecorder {
 		requestModel:       func(r *openai.ResponseRequest) string { return r.Model },
 		requestAttrs:       responsesRequestAttrs,
 		responseAttrs:      responsesResponseAttrs,
+		responseError:      responsesResponseError,
 		outputMessages:     responsesOutputMessages,
 		systemInstructions: responsesSystemInstructions,
 		conversationID:     responsesConversationID,
+		foldChunks:         responsesFoldChunks,
 	}
 }
 
@@ -283,6 +286,7 @@ func NewSpeechRecorder(config *Config) tracingapi.SpeechRecorder {
 		operation:    OperationSpeech,
 		config:       configOrEnv(config),
 		requestModel: func(r *openai.SpeechRequest) string { return r.Model },
+		requestAttrs: speechRequestAttrs,
 	}
 }
 
@@ -431,15 +435,15 @@ func NewCountTokensRecorder(config *Config) tracingapi.CountTokensRecorder {
 // chatUsageDetailAttrs extracts the cache and reasoning breakdowns that OpenAI
 // reports in the nested token details.
 func chatUsageDetailAttrs(u *openai.Usage) []attribute.KeyValue {
-	var cacheRead, cacheCreation, reasoning int
+	var cacheRead, cacheWrite, reasoning int
 	if td := u.PromptTokensDetails; td != nil {
 		cacheRead = td.CachedTokens
-		cacheCreation = td.CacheWriteTokensValue()
+		cacheWrite = td.CacheWriteTokensValue()
 	}
 	if td := u.CompletionTokensDetails; td != nil {
 		reasoning = td.ReasoningTokens
 	}
-	return usageDetailAttrs(cacheRead, cacheCreation, reasoning)
+	return usageDetailAttrs(cacheRead, cacheWrite, reasoning)
 }
 
 // responseIdentityAttrs builds the response id and model attributes, omitting
