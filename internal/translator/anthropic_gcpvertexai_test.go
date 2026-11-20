@@ -6,6 +6,7 @@
 package translator
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -126,17 +127,76 @@ func TestAnthropicToGCPVertexAI_RequestBodyRejectsUnsupportedContent(t *testing.
 	require.ErrorContains(t, err, "document content is not supported")
 }
 
-func TestAnthropicToGCPVertexAI_RequestBodyRejectsAdaptiveThinking(t *testing.T) {
-	req := &anthropicschema.MessagesRequest{
-		Model:     "gemini-1.5-pro",
-		MaxTokens: 100,
-		Thinking:  &anthropicschema.Thinking{Adaptive: &anthropicschema.ThinkingAdaptive{Type: "adaptive"}},
-		Messages:  []anthropicschema.MessageParam{{Role: anthropicschema.MessageRoleUser, Content: anthropicschema.MessageContent{Text: "Hello"}}},
+func TestAnthropicToGCPVertexAI_RequestBodyThinkingConfig(t *testing.T) {
+	adaptive := &anthropicschema.Thinking{Adaptive: &anthropicschema.ThinkingAdaptive{Type: "adaptive"}}
+	disabled := &anthropicschema.Thinking{Disabled: &anthropicschema.ThinkingDisabled{Type: "disabled"}}
+	enabled := &anthropicschema.Thinking{Enabled: &anthropicschema.ThinkingEnabled{Type: "enabled", BudgetTokens: 2048}}
+	effort := func(e anthropicschema.OutputConfigEffort) *anthropicschema.OutputConfig {
+		return &anthropicschema.OutputConfig{Effort: e}
 	}
 
-	tr := NewAnthropicToGCPVertexAITranslator("")
-	_, _, err := tr.RequestBody(nil, req, false)
-	require.ErrorContains(t, err, "thinking type adaptive is not supported")
+	tests := []struct {
+		name     string
+		model    string
+		thinking *anthropicschema.Thinking
+		output   *anthropicschema.OutputConfig
+		want     string // expected thinkingConfig JSON; empty means the field is absent.
+		wantErr  string
+	}{
+		{name: "effort low", model: "gemini-4-neon", output: effort("low"), want: `{"thinkingLevel":"LOW"}`},
+		{name: "effort medium", model: "gemini-4-neon", output: effort("medium"), want: `{"thinkingLevel":"MEDIUM"}`},
+		{name: "effort high", model: "gemini-4-neon", output: effort("high"), want: `{"thinkingLevel":"HIGH"}`},
+		{name: "effort xhigh maps to HIGH", model: "gemini-4-neon", output: effort("xhigh"), want: `{"thinkingLevel":"HIGH"}`},
+		{name: "effort max maps to HIGH", model: "gemini-4-neon", output: effort("max"), want: `{"thinkingLevel":"HIGH"}`},
+		{name: "effort xhigh on gemini 3 flash", model: "gemini-3-flash-preview", output: effort("xhigh"), want: `{"thinkingLevel":"HIGH"}`},
+		{name: "effort medium on gemini 3 pro has no MEDIUM", model: "gemini-3-pro-preview", output: effort("medium"), want: `{"thinkingLevel":"HIGH"}`},
+		{name: "empty effort", model: "gemini-4-neon", output: effort(""), want: ""},
+		{name: "output_config without effort", model: "gemini-4-neon", output: &anthropicschema.OutputConfig{}, want: ""},
+		{name: "adaptive with effort", model: "gemini-4-neon", thinking: adaptive, output: effort("low"), want: `{"includeThoughts":true,"thinkingLevel":"LOW"}`},
+		{name: "adaptive with max", model: "gemini-4-neon", thinking: adaptive, output: effort("max"), want: `{"includeThoughts":true,"thinkingLevel":"HIGH"}`},
+		{name: "adaptive without effort", model: "gemini-4-neon", thinking: adaptive, want: `{"includeThoughts":true}`},
+		{name: "enabled with budget only", model: "gemini-4-neon", thinking: enabled, want: `{"includeThoughts":true,"thinkingBudget":2048}`},
+		{name: "enabled with budget and effort prefers level", model: "gemini-4-neon", thinking: enabled, output: effort("medium"), want: `{"includeThoughts":true,"thinkingLevel":"MEDIUM"}`},
+		{name: "enabled with budget and effort on gemini 2.5 keeps budget", model: "gemini-2.5-flash", thinking: enabled, output: effort("high"), want: `{"includeThoughts":true,"thinkingBudget":2048}`},
+		{name: "disabled", model: "gemini-4-neon", thinking: disabled, want: `{}`},
+		{name: "disabled ignores effort", model: "gemini-4-neon", thinking: disabled, output: effort("high"), want: `{}`},
+		{name: "effort ignored before gemini 3", model: "gemini-2.5-pro", output: effort("high"), want: ""},
+		{name: "adaptive on gemini 2.5 has no level", model: "gemini-2.5-pro", thinking: adaptive, output: effort("high"), want: `{"includeThoughts":true}`},
+		{name: "unknown effort is a 400", model: "gemini-4-neon", output: effort("extreme"), wantErr: `unsupported output_config.effort "extreme"`},
+		{name: "unknown effort is a 400 even when disabled", model: "gemini-4-neon", thinking: disabled, output: effort("extreme"), wantErr: "unsupported output_config.effort"},
+	}
+	for _, tc := range tests {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%v", tc.name, stream), func(t *testing.T) {
+				req := &anthropicschema.MessagesRequest{
+					Model:        tc.model,
+					MaxTokens:    100,
+					Stream:       stream,
+					Thinking:     tc.thinking,
+					OutputConfig: tc.output,
+					Messages:     []anthropicschema.MessageParam{{Role: anthropicschema.MessageRoleUser, Content: anthropicschema.MessageContent{Text: "Hello"}}},
+				}
+				_, body, err := NewAnthropicToGCPVertexAITranslator("").RequestBody(nil, req, false)
+				if tc.wantErr != "" {
+					require.ErrorIs(t, err, internalapi.ErrInvalidRequestBody)
+					require.ErrorContains(t, err, tc.wantErr)
+					return
+				}
+				require.NoError(t, err)
+				var got struct {
+					GenerationConfig struct {
+						ThinkingConfig json.RawMessage `json:"thinkingConfig"`
+					} `json:"generationConfig"`
+				}
+				require.NoError(t, json.Unmarshal(body, &got))
+				if tc.want == "" {
+					require.Empty(t, got.GenerationConfig.ThinkingConfig)
+					return
+				}
+				require.JSONEq(t, tc.want, string(got.GenerationConfig.ThinkingConfig))
+			})
+		}
+	}
 }
 
 func TestAnthropicToGCPVertexAI_RequestBodyRejectsUnsupportedOptions(t *testing.T) {
