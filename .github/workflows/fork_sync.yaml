@@ -143,6 +143,9 @@ jobs:
         env:
           FORCE: ${{ inputs.force }}
         run: |
+          # GitHub runs this with `bash -e`; turn it off so a non-zero jj-fork exit (20 = needs repair)
+          # is captured from PIPESTATUS instead of aborting the step before the result is recorded.
+          set +e
           set -uo pipefail
           out="$RUNNER_TEMP/out"        # plans and reports must stay outside the working tree
           mkdir -p "$out"
@@ -153,14 +156,16 @@ jobs:
 
           result() { echo "result=$1" >> "$GITHUB_OUTPUT"; echo "exit_code=$2" >> "$GITHUB_OUTPUT"; }
 
-          git fetch --quiet upstream main
+          fail() { echo "$*" | tee -a "$log"; result error 1; exit 0; }
+
+          git fetch --quiet upstream main || fail "git fetch upstream main failed"
           upstream_sha="$(git rev-parse FETCH_HEAD)"
           before="$(git ls-remote origin refs/heads/fork/main | awk '{print $1}')"
           echo "upstream_sha=$upstream_sha" >> "$GITHUB_OUTPUT"
           echo "before=$before" >> "$GITHUB_OUTPUT"
           echo "out=$out" >> "$GITHUB_OUTPUT"
 
-          git fetch --quiet origin fork/main
+          git fetch --quiet origin fork/main || fail "git fetch origin fork/main failed"
           if [[ "$FORCE" != "true" ]] && git merge-base --is-ancestor "$upstream_sha" "$before"; then
             echo "fork/main ($before) already contains upstream main ($upstream_sha); nothing to do." | tee -a "$log"
             echo "after=$before" >> "$GITHUB_OUTPUT"
