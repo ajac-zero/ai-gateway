@@ -236,34 +236,7 @@ jobs:
           UPSTREAM_SHA: ${{ steps.sync.outputs.upstream_sha }}
           OUT: ${{ steps.sync.outputs.out }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          if [[ "$RESULT" == "pushed" ]]; then
-            exit 0   # handled by the next step
-          fi
-          issues="$(jq -r '[.. | objects | select(has("id") and (.id|type=="string") and (.id|test("^(series|glue|fork)-"))) | "- `" + .id + "`"] | unique | .[]' "$OUT/report.json" 2>/dev/null || true)"
-          body="$(
-            echo "Run: $RUN_URL"
-            echo "Upstream main: \`$UPSTREAM_SHA\`"
-            echo "Exit code: \`$CODE\` ($RESULT)"
-            echo
-            if [[ -n "$issues" ]]; then
-              echo "Issues from the report:"
-              echo "$issues"
-              echo
-            fi
-            echo "Last lines of the sync log (the full report is in the run's \`fork-sync-report\` artifact):"
-            echo '```'
-            tail -n 40 "$OUT/sync.log" | cut -c1-300
-            echo '```'
-          )"
-          num="$(gh issue list --label "$ISSUE_LABEL" --state open --json number --jq '.[0].number // empty')"
-          if [[ -n "$num" ]]; then
-            gh issue comment "$num" --body "$body"
-          elif [[ "$RESULT" == "conflict" ]]; then
-            gh label create "$ISSUE_LABEL" --color B60205 --description "Upstream sync needs a person or agent" 2>/dev/null || true
-            gh issue create --title "$ISSUE_TITLE" --label "$ISSUE_LABEL" --body "$body"
-          fi
+        run: .github/scripts/report-sync-issue.sh
 
       - name: Close repair issues after a clean sync
         if: steps.sync.outputs.result == 'pushed' || steps.sync.outputs.result == 'noop'
