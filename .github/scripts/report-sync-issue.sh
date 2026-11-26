@@ -5,11 +5,15 @@
 #
 # Env: RESULT CODE UPSTREAM_SHA OUT RUN_URL ISSUE_LABEL ISSUE_TITLE (and GH_TOKEN for gh).
 #
-# - An open issue with the label gets a comment.
+# - An open repair issue (labelled, or title plus marker; see repair-issues.sh) gets a comment, so repeated
+#   conflicts never open a second issue.
 # - On a conflict with no open issue, a new issue is created. The label is created first. If that
 #   fails, the gh error is surfaced as a workflow warning (it used to be swallowed) and the issue is
 #   still opened without the label, so a conflict is never left unreported.
 set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=repair-issues.sh
+source "$here/repair-issues.sh"
 
 if [[ "$RESULT" == "pushed" ]]; then
   exit 0 # handled by the "Close repair issues" step
@@ -30,9 +34,11 @@ body="$(
   echo '```'
   tail -n 40 "$OUT/sync.log" 2>/dev/null | cut -c1-300 || true
   echo '```'
+  echo
+  echo "$ISSUE_MARKER"
 )"
 
-num="$(gh issue list --label "$ISSUE_LABEL" --state open --json number --jq '.[0].number // empty' 2>/dev/null || true)"
+num="$(list_repair_issues | head -n1)"
 if [[ -n "$num" ]]; then
   gh issue comment "$num" --body "$body"
 elif [[ "$RESULT" == "conflict" ]]; then

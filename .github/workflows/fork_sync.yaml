@@ -244,11 +244,7 @@ jobs:
           UPSTREAM_SHA: ${{ steps.sync.outputs.upstream_sha }}
           AFTER: ${{ steps.sync.outputs.after }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          for num in $(gh issue list --label "$ISSUE_LABEL" --state open --json number --jq '.[].number'); do
-            gh issue close "$num" --comment "Resolved by a clean sync: $RUN_URL (upstream main \`$UPSTREAM_SHA\`, fork/main \`$AFTER\`)."
-          done
+        run: .github/scripts/close-repair-issues.sh
 
       - name: Fail unless the sync succeeded
         if: always()
