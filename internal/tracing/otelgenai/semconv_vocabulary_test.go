@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
 	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
 )
 
@@ -27,6 +28,8 @@ func TestAttributeNames_matchSemconv(t *testing.T) {
 	}{
 		{ours: OperationName, expected: string(semconv.GenAIOperationNameKey)},
 		{ours: ProviderName, expected: string(semconv.GenAIProviderNameKey)},
+		{ours: RequestStream, expected: string(semconv.GenAIRequestStreamKey)},
+		{ours: OutputType, expected: string(semconv.GenAIOutputTypeKey)},
 		{ours: ConversationID, expected: string(semconv.GenAIConversationIDKey)},
 
 		{ours: RequestModel, expected: string(semconv.GenAIRequestModelKey)},
@@ -48,7 +51,7 @@ func TestAttributeNames_matchSemconv(t *testing.T) {
 		{ours: UsageInputTokens, expected: string(semconv.GenAIUsageInputTokensKey)},
 		{ours: UsageOutputTokens, expected: string(semconv.GenAIUsageOutputTokensKey)},
 		{ours: UsageCacheReadInputTokens, expected: string(semconv.GenAIUsageCacheReadInputTokensKey)},
-		{ours: UsageCacheCreationInputTokens, expected: string(semconv.GenAIUsageCacheCreationInputTokensKey)},
+		{ours: UsageCacheWriteInputTokens, expected: "gen_ai.usage.cache_write.input_tokens"},
 		{ours: UsageReasoningOutputTokens, expected: string(semconv.GenAIUsageReasoningOutputTokensKey)},
 
 		{ours: InputMessages, expected: string(semconv.GenAIInputMessagesKey)},
@@ -84,4 +87,18 @@ func TestOperations_matchSemconv(t *testing.T) {
 			require.Equal(t, tc.expected, string(tc.ours))
 		})
 	}
+}
+
+// TestProviders_matchSemconv pins the providers that have a registry member.
+func TestProviders_matchSemconv(t *testing.T) {
+	require.Equal(t, semconv.GenAIProviderNameOpenAI.Value.AsString(), string(ProviderOpenAI))
+	require.Equal(t, semconv.GenAIProviderNameAzureAIOpenAI.Value.AsString(), string(ProviderAzureOpenAI))
+	require.Equal(t, semconv.GenAIProviderNameAWSBedrock.Value.AsString(), string(ProviderAWSBedrock))
+	require.Equal(t, semconv.GenAIProviderNameGCPVertexAI.Value.AsString(), string(ProviderGCPVertexAI))
+	require.Equal(t, semconv.GenAIProviderNameAnthropic.Value.AsString(), string(ProviderAnthropic))
+	require.Equal(t, semconv.GenAIProviderNameCohere.Value.AsString(), string(ProviderCohere))
+	require.Equal(t, attribute.StringValue(OutputTypeJSON), semconv.GenAIOutputTypeJSON.Value)
+	require.Equal(t, attribute.StringValue(OutputTypeText), semconv.GenAIOutputTypeText.Value)
+	require.Equal(t, attribute.StringValue(OutputTypeImage), semconv.GenAIOutputTypeImage.Value)
+	require.Equal(t, attribute.StringValue(OutputTypeSpeech), semconv.GenAIOutputTypeSpeech.Value)
 }

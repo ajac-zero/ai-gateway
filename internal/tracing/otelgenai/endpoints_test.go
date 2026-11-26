@@ -103,10 +103,10 @@ func TestDecisionsRecorder_RecordResponse(t *testing.T) {
 		attribute.Int(UsageInputTokens, 100),
 		attribute.Int(UsageOutputTokens, 50),
 		attribute.Int(UsageCacheReadInputTokens, 80),
-		attribute.Int(UsageCacheCreationInputTokens, 20),
+		attribute.Int(UsageCacheWriteInputTokens, 20),
 		attribute.Int(UsageReasoningOutputTokens, 30),
 	}, span.Attributes)
-	require.Equal(t, codes.Ok, span.Status.Code)
+	require.Equal(t, codes.Unset, span.Status.Code)
 }
 
 // TestChatCompletionRecorder_RecordRequest_noContentByDefault pins that the raw
@@ -151,7 +151,7 @@ func TestChatCompletionRecorder_RecordResponse(t *testing.T) {
 		attribute.Int(UsageOutputTokens, 7),
 		attribute.StringSlice(ResponseFinishReasons, []string{"stop"}),
 	}, span.Attributes)
-	require.Equal(t, codes.Ok, span.Status.Code)
+	require.Equal(t, codes.Unset, span.Status.Code)
 }
 
 // TestChatCompletionRecorder_RecordResponse_omitsAbsent pins that absent values
@@ -166,7 +166,7 @@ func TestChatCompletionRecorder_RecordResponse_omitsAbsent(t *testing.T) {
 	})
 
 	require.Empty(t, span.Attributes)
-	require.Equal(t, codes.Ok, span.Status.Code)
+	require.Equal(t, codes.Unset, span.Status.Code)
 }
 
 func TestChatCompletionRecorder_RecordResponseChunks(t *testing.T) {
@@ -192,7 +192,7 @@ func TestChatCompletionRecorder_RecordResponseChunks(t *testing.T) {
 		attribute.Int(UsageOutputTokens, 7),
 		attribute.StringSlice(ResponseFinishReasons, []string{"stop"}),
 	}, span.Attributes)
-	require.Equal(t, codes.Ok, span.Status.Code)
+	require.Equal(t, codes.Unset, span.Status.Code)
 }
 
 func TestChatCompletionRecorder_RecordResponseChunks_boundaries(t *testing.T) {
@@ -335,7 +335,7 @@ func TestCompletionRecorder_RecordResponse(t *testing.T) {
 				return false
 			})
 			testotel.RequireAttributesEqual(t, tc.expected, span.Attributes)
-			require.Equal(t, codes.Ok, span.Status.Code)
+			require.Equal(t, codes.Unset, span.Status.Code)
 		})
 	}
 }
@@ -387,9 +387,8 @@ func TestCompletionRecorder_RecordResponseChunks(t *testing.T) {
 				return false
 			})
 			testotel.RequireAttributesEqual(t, tc.expected, span.Attributes)
-			// A stream that carried nothing usable is still a successful
-			// response, not an error.
-			require.Equal(t, codes.Ok, span.Status.Code)
+			// A successful span leaves status unset per the OTel API.
+			require.Equal(t, codes.Unset, span.Status.Code)
 		})
 	}
 }
@@ -499,7 +498,7 @@ func TestEmbeddingsRecorder_RecordResponse(t *testing.T) {
 				return false
 			})
 			testotel.RequireAttributesEqual(t, tc.expected, span.Attributes)
-			require.Equal(t, codes.Ok, span.Status.Code)
+			require.Equal(t, codes.Unset, span.Status.Code)
 		})
 	}
 }
@@ -547,7 +546,7 @@ func TestSystemOneRecorder_RecordResponse(t *testing.T) {
 				return false
 			})
 			testotel.RequireAttributesEqual(t, tc.expected, span.Attributes)
-			require.Equal(t, codes.Ok, span.Status.Code)
+			require.Equal(t, codes.Unset, span.Status.Code)
 		})
 	}
 }
@@ -575,7 +574,7 @@ func TestResponsesInputTokensRecorder_records(t *testing.T) {
 	testotel.RequireAttributesEqual(t, []attribute.KeyValue{
 		attribute.Int(UsageInputTokens, 42),
 	}, respSpan.Attributes)
-	require.Equal(t, codes.Ok, respSpan.Status.Code)
+	require.Equal(t, codes.Unset, respSpan.Status.Code)
 }
 
 // TestCountTokensRecorder_records pins that Anthropic's count_tokens describes
@@ -628,7 +627,7 @@ func TestCountTokensRecorder_records(t *testing.T) {
 		testotel.RequireAttributesEqual(t, []attribute.KeyValue{
 			attribute.Int(UsageInputTokens, 42),
 		}, span.Attributes)
-		require.Equal(t, codes.Ok, span.Status.Code)
+		require.Equal(t, codes.Unset, span.Status.Code)
 	})
 }
 

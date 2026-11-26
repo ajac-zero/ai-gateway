@@ -31,6 +31,10 @@ type recorder[ReqT, RespT, ChunkT any] struct {
 	// describe, or in chunkAttrs' case does not stream.
 	requestAttrs  func(*ReqT) []attribute.KeyValue
 	responseAttrs func(*RespT) []attribute.KeyValue
+	// responseError returns an error.type and a description when the response
+	// represents a failed operation. Both values are empty for successful or
+	// incomplete responses.
+	responseError func(*RespT) (string, string)
 	chunkAttrs    func([]*ChunkT) []attribute.KeyValue
 
 	// inputMessages and outputMessages contribute captured message content.
@@ -113,10 +117,19 @@ func (r *recorder[ReqT, RespT, ChunkT]) RecordResponse(span trace.Span, resp *Re
 	if r.config.CaptureMessageContent && r.outputMessages != nil {
 		attrs = append(attrs, messagesAttr(OutputMessages, r.outputMessages(resp))...)
 	}
+	if r.responseError != nil {
+		if errorType, description := r.responseError(resp); errorType != "" {
+			attrs = append(attrs, attribute.String(ErrorType, errorType))
+			if r.config.CaptureMessageContent && description != "" {
+				span.SetStatus(codes.Error, description)
+			} else {
+				span.SetStatus(codes.Error, errorType)
+			}
+		}
+	}
 	if len(attrs) > 0 {
 		span.SetAttributes(attrs...)
 	}
-	span.SetStatus(codes.Ok, "")
 }
 
 // RecordResponseChunks implements tracingapi.SpanResponseRecorder.
@@ -125,7 +138,6 @@ func (r *recorder[ReqT, RespT, ChunkT]) RecordResponseChunks(span trace.Span, ch
 	// path, so there is only one mapping to keep correct.
 	if r.foldChunks != nil {
 		if len(chunks) == 0 {
-			span.SetStatus(codes.Ok, "")
 			return
 		}
 		r.RecordResponse(span, r.foldChunks(chunks))
@@ -142,7 +154,6 @@ func (r *recorder[ReqT, RespT, ChunkT]) RecordResponseChunks(span trace.Span, ch
 	if len(attrs) > 0 {
 		span.SetAttributes(attrs...)
 	}
-	span.SetStatus(codes.Ok, "")
 }
 
 // RecordResponseOnError implements tracingapi.SpanResponseRecorder.
@@ -171,13 +182,13 @@ func usageAttrs(inputTokens, outputTokens int) []attribute.KeyValue {
 //
 // The conventions define no equivalent of OpenInference's audio token counts,
 // so those are omitted rather than emitted as custom attributes.
-func usageDetailAttrs(cacheRead, cacheCreation, reasoning int) []attribute.KeyValue {
+func usageDetailAttrs(cacheRead, cacheWrite, reasoning int) []attribute.KeyValue {
 	var attrs []attribute.KeyValue
 	if cacheRead > 0 {
 		attrs = append(attrs, attribute.Int(UsageCacheReadInputTokens, cacheRead))
 	}
-	if cacheCreation > 0 {
-		attrs = append(attrs, attribute.Int(UsageCacheCreationInputTokens, cacheCreation))
+	if cacheWrite > 0 {
+		attrs = append(attrs, attribute.Int(UsageCacheWriteInputTokens, cacheWrite))
 	}
 	if reasoning > 0 {
 		attrs = append(attrs, attribute.Int(UsageReasoningOutputTokens, reasoning))

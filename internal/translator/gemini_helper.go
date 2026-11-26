@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"path"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -56,11 +57,50 @@ const (
 // -------------------------------------------------------------.
 
 // openAIMessagesToGeminiContents converts OpenAI messages to Gemini Contents and SystemInstruction.
+//
+// Both plain user text and functionResponse parts go on role="user" contents,
+// but Vertex Gemini rejects a single content that mixes the two. It returns
+// "Requests ending with a model turn are not supported." even though the
+// request literally ends in role="user". Emitting the functionResponse group
+// and any following user text as two consecutive role="user" contents is
+// accepted (verified against gemini-3.6-flash on Vertex REST).
+//
+// To honor that boundary without inventing content or reordering messages, we
+// buffer consecutive OpenAI user- or tool-role parts into a single pending
+// group and flush it whenever the kind changes or the assistant turn arrives.
 func openAIMessagesToGeminiContents(messages []openai.ChatCompletionMessageParamUnion, requestModel internalapi.RequestModel) ([]genai.Content, *genai.Content, error) {
 	var gcpContents []genai.Content
 	var systemInstruction *genai.Content
 	knownToolCalls := make(map[string]string)
-	var gcpParts []*genai.Part
+
+	// pendingParts buffers parts that will end up on a single Gemini
+	// role="user" content. pendingKind records whether those parts came from
+	// OpenAI "user" or "tool" messages; a transition between the two triggers
+	// a flush so the resulting Gemini contents preserve the boundary.
+	const (
+		kindNone = 0
+		kindUser = 1
+		kindTool = 2
+	)
+	var pendingParts []*genai.Part
+	pendingKind := kindNone
+
+	flushPending := func() {
+		if len(pendingParts) == 0 {
+			return
+		}
+		gcpContents = append(gcpContents, genai.Content{Role: genai.RoleUser, Parts: pendingParts})
+		pendingParts = nil
+		pendingKind = kindNone
+	}
+
+	appendParts := func(kind int, parts ...*genai.Part) {
+		if pendingKind != kindNone && pendingKind != kind {
+			flushPending()
+		}
+		pendingKind = kind
+		pendingParts = append(pendingParts, parts...)
+	}
 
 	for _, msgUnion := range messages {
 		switch {
@@ -95,20 +135,16 @@ func openAIMessagesToGeminiContents(messages []openai.ChatCompletionMessageParam
 			if err != nil {
 				return nil, nil, fmt.Errorf("invalid user message: %w", err)
 			}
-			gcpParts = append(gcpParts, parts...)
+			appendParts(kindUser, parts...)
 		case msgUnion.OfTool != nil:
 			msg := msgUnion.OfTool
 			part, err := toolMsgToGeminiParts(*msg, knownToolCalls)
 			if err != nil {
 				return nil, nil, fmt.Errorf("invalid tool message: %w", err)
 			}
-			gcpParts = append(gcpParts, part)
+			appendParts(kindTool, part)
 		case msgUnion.OfAssistant != nil:
-			// Flush any accumulated user/tool parts before assistant.
-			if len(gcpParts) > 0 {
-				gcpContents = append(gcpContents, genai.Content{Role: genai.RoleUser, Parts: gcpParts})
-				gcpParts = nil
-			}
+			flushPending()
 			msg := msgUnion.OfAssistant
 			assistantParts, toolCalls, err := assistantMsgToGeminiParts(msg)
 			if err != nil {
@@ -121,10 +157,7 @@ func openAIMessagesToGeminiContents(messages []openai.ChatCompletionMessageParam
 		}
 	}
 
-	// If there are any remaining parts after processing all messages, add them as user content.
-	if len(gcpParts) > 0 {
-		gcpContents = append(gcpContents, genai.Content{Role: genai.RoleUser, Parts: gcpParts})
-	}
+	flushPending()
 	return gcpContents, systemInstruction, nil
 }
 
@@ -369,6 +402,8 @@ func assistantMsgToGeminiParts(msg *openai.ChatCompletionAssistantMessageParam) 
 				if contPart.Text != nil && *contPart.Text != "" {
 					parts = append(parts, genai.NewPartFromText(*contPart.Text))
 				}
+			case openai.ChatCompletionAssistantMessageParamContentTypeRedactedThinking:
+				// Gemini has no redacted thinking; it can only come from another provider, so drop it.
 			case openai.ChatCompletionAssistantMessageParamContentTypeThinking:
 				if contPart.Text != nil && *contPart.Text != "" {
 					thoughtPart := genai.NewPartFromText(*contPart.Text)
@@ -395,6 +430,18 @@ func assistantMsgToGeminiParts(msg *openai.ChatCompletionAssistantMessageParam) 
 		// No content provided, this is valid.
 	default:
 		return nil, nil, fmt.Errorf("%w: message 'content' must be a string or an array", internalapi.ErrInvalidRequestBody)
+	}
+
+	// Gemini can return the signature on a text answer with an empty thought summary, so the thinking
+	// block has no text to carry it. Google documents the signature on the final text part in that
+	// case. Do not invent a part when there is no text.
+	if len(msg.ToolCalls) == 0 && thoughtSignature != nil && !slices.ContainsFunc(parts, func(p *genai.Part) bool { return p.ThoughtSignature != nil }) {
+		for i := len(parts) - 1; i >= 0; i-- {
+			if parts[i].Text != "" && !parts[i].Thought {
+				parts[i].ThoughtSignature = thoughtSignature
+				break
+			}
+		}
 	}
 
 	return parts, knownToolCalls, nil
@@ -947,9 +994,16 @@ func geminiFinishReasonToOpenAI[T toolCallSlice](reason genai.FinishReason, tool
 func extractTextAndThoughtSummaryFromGeminiParts(parts []*genai.Part, responseMode geminiResponseMode) (string, string, string) {
 	var textBuilder strings.Builder
 	var thoughtBuilder strings.Builder
-	var signatureBuilder strings.Builder
+	var signature string
 
 	for _, part := range parts {
+		// A thought signature can sit on a thought part, a text part, or a part with empty text
+		// (signature-only). Keep only the first one: Gemini sends at most one per response and
+		// concatenating base64 values would corrupt it. Signatures on functionCall parts are
+		// collected by the tool call extraction instead.
+		if part != nil && part.FunctionCall == nil && signature == "" && len(part.ThoughtSignature) > 0 {
+			signature = base64.StdEncoding.EncodeToString(part.ThoughtSignature)
+		}
 		if part != nil && part.Text != "" {
 			if part.Thought {
 				thoughtBuilder.WriteString(part.Text)
@@ -969,15 +1023,11 @@ func extractTextAndThoughtSummaryFromGeminiParts(parts []*genai.Part, responseMo
 					// output matches the requested choices verbatim.
 					part.Text = strings.TrimSpace(part.Text)
 				}
-				// ThoughtSignature is only appended with Thought as False
-				if part.ThoughtSignature != nil {
-					signatureBuilder.WriteString(base64.StdEncoding.EncodeToString(part.ThoughtSignature))
-				}
 				textBuilder.WriteString(part.Text)
 			}
 		}
 	}
-	return thoughtBuilder.String(), textBuilder.String(), signatureBuilder.String()
+	return thoughtBuilder.String(), textBuilder.String(), signature
 }
 
 // extractToolCallsFromGeminiParts extracts tool calls and thought signature from Gemini parts.

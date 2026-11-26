@@ -347,6 +347,7 @@ func (m *mcpRequestContext) handleServerDiscover(ctx context.Context, w http.Res
 					slog.String("error", err.Error()))
 				backendMetrics.RecordMethodErrorCount(ctx, req.Method, nil, metrics.MCPStatusError)
 				backendMetrics.RecordRequestErrorDuration(ctx, backendStartAt, errorType(err), nil)
+				m.recordClientOperation(ctx, backend.Name, backendStartAt, req.Method, nil, err)
 				// Only a legacy-shaped rejection counts. A transport error, 5xx,
 				// or modern-only protocol error has not shown that this backend
 				// is pre-2026-07-28, and must not flip the whole route to -32022.
@@ -359,6 +360,7 @@ func (m *mcpRequestContext) handleServerDiscover(ctx context.Context, w http.Res
 			}
 			backendMetrics.RecordMethodCount(ctx, req.Method, nil)
 			backendMetrics.RecordRequestDuration(ctx, backendStartAt, nil)
+			m.recordClientOperation(ctx, backend.Name, backendStartAt, req.Method, nil, nil)
 			mu.Lock()
 			if span != nil {
 				span.RecordRouteToBackend(backend.Name, "", true)
@@ -1830,6 +1832,7 @@ func sendToAllModernBackendsAndAggregateResponses[T any](ctx context.Context, m 
 					slog.String("error", err.Error()))
 				backendMetrics.RecordMethodErrorCount(ctx, req.Method, nil, metrics.MCPStatusError)
 				backendMetrics.RecordRequestErrorDuration(ctx, backendStartAt, errorType(err), nil)
+				m.recordClientOperation(ctx, backendName, backendStartAt, req.Method, nil, err)
 				return
 			}
 			var result T
@@ -1839,11 +1842,14 @@ func sendToAllModernBackendsAndAggregateResponses[T any](ctx context.Context, m 
 					slog.String("backend", backendName),
 					slog.String("error", err.Error()))
 				backendMetrics.RecordMethodErrorCount(ctx, req.Method, nil, metrics.MCPStatusError)
+				unmarshalErr := fmt.Errorf("failed to unmarshal %s response: %w", req.Method, err)
 				backendMetrics.RecordRequestErrorDuration(ctx, backendStartAt, metrics.MCPErrorInternal, nil)
+				m.recordClientOperation(ctx, backendName, backendStartAt, req.Method, nil, unmarshalErr)
 				return
 			}
 			backendMetrics.RecordMethodCount(ctx, req.Method, nil)
 			backendMetrics.RecordRequestDuration(ctx, backendStartAt, nil)
+			m.recordClientOperation(ctx, backendName, backendStartAt, req.Method, nil, nil)
 			mu.Lock()
 			if span != nil {
 				span.RecordRouteToBackend(backendName, "", true)
